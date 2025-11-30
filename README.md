@@ -1,98 +1,205 @@
-# Auto Follow-up Service
+# Auto-Followup Service
 
-Service de gestion des relances automatiques pour les mails de prospection.
+Automated email followup scheduling and processing service for prospecting campaigns.
 
-## Fonctionnalités
+## 🎯 Features
 
-- **Planification des relances** : Crée automatiquement des relances à J+3, J+7, J+10 et J+180
-- **Annulation intelligente** : Annule les relances si le prospect répond
-- **Traitement périodique** : Endpoint pour traiter les relances en attente (à appeler via Cloud Scheduler)
+- **Followup Scheduling**: Automatically schedules followup emails based on French business days
+- **Business Day Calculation**: Accounts for French holidays including Easter-based dates
+- **Cancellation**: Cancel pending followups when a prospect responds
+- **Processing**: Process due followups by triggering the mail-writer service
+- **Retry**: Retry failed followup operations
 
-## Endpoints
+## 🏗️ Architecture
 
-### POST /schedule-followups
-Planifie les relances pour un draft envoyé.
+This project follows **Clean Architecture** principles:
 
-```json
-{
-  "draft_id": "uuid-du-draft"
-}
+```
+src/auto_followup/
+├── __init__.py              # Package version
+├── app.py                   # Flask application factory
+├── config/                  # Configuration management
+│   ├── __init__.py
+│   └── settings.py          # Dataclass-based settings
+├── core/                    # Business logic (no dependencies)
+│   ├── __init__.py
+│   ├── business_days.py     # French business day calculations
+│   └── exceptions.py        # Domain exceptions
+├── infrastructure/          # External dependencies
+│   ├── __init__.py
+│   ├── logging.py           # Structured JSON logging
+│   ├── firestore/           # Firestore repositories
+│   │   ├── __init__.py
+│   │   ├── models.py        # Data models
+│   │   └── repositories.py  # Repository pattern
+│   └── http/                # HTTP clients
+│       ├── __init__.py
+│       ├── odoo_client.py   # Odoo CRM client
+│       └── mail_writer_client.py  # Mail-writer client
+├── services/                # Business logic orchestration
+│   ├── __init__.py
+│   ├── scheduler.py         # Followup scheduling
+│   ├── cancellation.py      # Followup cancellation
+│   ├── processor.py         # Followup processing
+│   └── retry.py             # Retry failed operations
+└── api/                     # HTTP layer
+    ├── __init__.py
+    └── routes.py            # Flask endpoints
 ```
 
-### POST /cancel-followups
-Annule toutes les relances d'un draft (appelé quand le prospect répond).
+## 🚀 Quick Start
 
-```json
-{
-  "draft_id": "uuid-du-draft"
-}
-```
+### Prerequisites
 
-### POST /process-pending-followups
-Traite les relances en attente (à appeler périodiquement via Cloud Scheduler).
+- Python 3.11+
+- Google Cloud SDK (for Firestore)
+- Docker (optional)
 
-**Processus** :
-1. Récupère les relances dont `scheduled_for <= now` et `status == "scheduled"`
-2. Vérifie que le draft original n'a pas reçu de réponse (`has_reply != true`)
-3. **Récupère les informations à jour depuis Odoo** via `x_external_id`
-4. Appelle mail-writer avec le numéro de relance approprié (1-4)
-5. Marque la relance comme `sent` ou `error`
-
-**Avantage** : Les informations du contact (nom, fonction, description) sont récupérées dynamiquement depuis Odoo, garantissant qu'elles sont toujours à jour même si elles ont changé depuis l'email initial.
-
-## Variables d'environnement
-
-- `DRAFT_COLLECTION` : Collection Firestore des drafts (default: "email_drafts")
-- `FOLLOWUP_COLLECTION` : Collection Firestore des relances (default: "email_followups")
-- `MAIL_WRITER_URL` : URL du service mail-writer pour générer les relances
-- `ODOO_DB_URL` : URL de base Odoo (ex: https://lightandshutter.odoo.com)
-- `ODOO_SECRET` : Token d'authentification Odoo
-
-**Important** : Les variables `ODOO_DB_URL` et `ODOO_SECRET` sont requises pour récupérer les informations à jour des contacts depuis Odoo lors du traitement des relances.
-
-## Déploiement
+### Installation
 
 ```bash
+# Clone the repository
+cd auto-followup
+
+# Create virtual environment
+python -m venv .venv
+source .venv/bin/activate
+
+# Install development dependencies
+make install-dev
+
+# Or using pip directly
+pip install -e ".[dev]"
+```
+
+### Configuration
+
+Set the following environment variables:
+
+```bash
+# Required
+export DRAFT_COLLECTION="email_drafts"
+export FOLLOWUP_COLLECTION="email_followups"
+export MAIL_WRITER_URL="https://your-mail-writer-service.run.app"
+export ODOO_DB_URL="https://your-odoo-api.com"
+export ODOO_SECRET="your-odoo-api-key"
+
+# Optional
+export ENVIRONMENT="development"  # or "production"
+export PORT="8080"
+```
+
+### Running Locally
+
+```bash
+# Development server
+make run
+
+# With gunicorn (production-like)
+make run-gunicorn
+```
+
+## 📡 API Endpoints
+
+### Health Check
+```http
+GET /health
+```
+
+### Schedule Followups
+```http
+POST /schedule-followups
+Content-Type: application/json
+
+{
+    "draft_id": "abc123"
+}
+```
+
+### Cancel Followups
+```http
+POST /cancel-followups
+Content-Type: application/json
+
+{
+    "draft_id": "abc123"
+}
+```
+
+### Process Pending Followups
+```http
+POST /process-pending-followups
+```
+
+### Retry Failed Followups
+```http
+POST /retry-failed-followups
+```
+
+## 🧪 Testing
+
+```bash
+# Run tests
+make test
+
+# Run tests with coverage
+make test-cov
+```
+
+## 🔧 Development
+
+```bash
+# Format code
+make format
+
+# Run linters
+make lint
+
+# Type checking
+make type-check
+
+# Run all checks
+make pre-commit
+```
+
+## 🐳 Docker
+
+```bash
+# Build image
+make docker-build
+
+# Run container
+make docker-run
+```
+
+## ☁️ Cloud Run Deployment
+
+```bash
+# Build and push to GCR
+gcloud builds submit --tag gcr.io/YOUR_PROJECT/auto-followup
+
+# Deploy to Cloud Run
 gcloud run deploy auto-followup \
-  --source . \
-  --region europe-west1 \
-  --allow-unauthenticated \
-  --set-env-vars DRAFT_COLLECTION=email_drafts,FOLLOWUP_COLLECTION=email_followups,MAIL_WRITER_URL=https://mail-writer-xxx.run.app,ODOO_DB_URL=https://lightandshutter.odoo.com,ODOO_SECRET=your_token
+    --image gcr.io/YOUR_PROJECT/auto-followup \
+    --platform managed \
+    --region europe-west1 \
+    --set-env-vars "DRAFT_COLLECTION=email_drafts,FOLLOWUP_COLLECTION=email_followups,..." \
+    --allow-unauthenticated
 ```
 
-## Configuration Cloud Scheduler
+## 📅 Followup Schedule
 
-Créer un job pour traiter les relances toutes les heures :
+The default followup schedule is:
 
-```bash
-gcloud scheduler jobs create http process-followups \
-  --location=europe-west1 \
-  --schedule="0 * * * *" \
-  --uri="https://auto-followup-xxx.a.run.app/process-pending-followups" \
-  --http-method=POST \
-  --time-zone="Europe/Paris"
-```
+| Followup # | Days After Sent |
+|------------|-----------------|
+| 1          | 3 business days |
+| 2          | 7 business days |
+| 3          | 10 business days|
+| 4          | 180 business days|
 
-## Structure Firestore
+This can be configured via the `FOLLOWUP_SCHEDULE` environment variable.
 
-### Collection email_followups
-```json
-{
-  "draft_id": "uuid-du-draft-original",
-  "version_group_id": "uuid-du-groupe",
-  "x_external_id": "pharow-company-id",  // Important: utilisé pour récupérer infos Odoo
-  "to": "prospect@example.com",
-  "subject": "Sujet original",
-  "scheduled_for": "2025-11-27T10:00:00Z",
-  "days_after_initial": 3,  // 3, 7, 10, ou 180
-  "status": "scheduled | sent | cancelled | processing | error",
-  "created_at": "2025-11-24T10:00:00Z",
-  "sent_at": "2025-11-27T10:15:00Z",
-  "draft_id_created": "uuid-du-nouveau-draft",  // ID du draft de relance créé
-  "cancelled_at": "...",
-  "cancellation_reason": "prospect_replied | manual | ...",
-  "error": "error message if status == error"
-}
-```
+## 📋 License
 
-**Note** : Le champ `x_external_id` est crucial car il permet de faire le lien avec Odoo pour récupérer les informations actuelles du contact lors du traitement de la relance.
+MIT
