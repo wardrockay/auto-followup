@@ -4,7 +4,7 @@ Odoo CRM API Client.
 Handles communication with the Odoo CRM API for retrieving contact information.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 import requests
@@ -13,7 +13,12 @@ from urllib3.util.retry import Retry
 
 from auto_followup.config import settings
 from auto_followup.core.exceptions import OdooError
+from auto_followup.infrastructure.circuit_breaker import (
+    get_circuit_breaker,
+    CircuitBreakerConfig,
+)
 from auto_followup.infrastructure.logging import get_logger, log_duration
+from auto_followup.infrastructure.metrics import get_metrics
 
 
 logger = get_logger(__name__)
@@ -28,7 +33,7 @@ class OdooContact:
     company_name: Optional[str] = None
     phone: Optional[str] = None
     mobile: Optional[str] = None
-    raw_data: Dict[str, Any] = None
+    raw_data: Dict[str, Any] = field(default_factory=dict)
     
     @classmethod
     def from_api_response(cls, data: Dict[str, Any]) -> "OdooContact":
@@ -66,9 +71,9 @@ class OdooClient:
             api_key: API key for authentication.
             timeout: Request timeout in seconds.
         """
-        self._base_url = (base_url or settings.odoo.url).rstrip("/")
-        self._api_key = api_key or settings.odoo.api_key
-        self._timeout = timeout or settings.odoo.timeout
+        self._base_url = (base_url or settings.odoo.base_url).rstrip("/")
+        self._api_key = api_key or settings.odoo.secret
+        self._timeout = timeout or settings.odoo.timeout_seconds
         self._session: Optional[requests.Session] = None
     
     @property
@@ -134,6 +139,7 @@ class OdooClient:
             return response.json()
             
         except requests.exceptions.Timeout as e:
+            get_metrics().external_requests_total.inc(service="odoo", status="timeout")
             logger.error(
                 f"Odoo API timeout: {endpoint}",
                 extra={"extra_fields": {
@@ -168,6 +174,14 @@ class OdooClient:
     
     @log_duration("odoo_get_contact")
     def get_contact(self, contact_id: str) -> OdooContact:
+        """Get contact with circuit breaker protection."""
+        cb = get_circuit_breaker(
+            "odoo-api",
+            CircuitBreakerConfig(failure_threshold=5, timeout_seconds=30.0),
+        )
+        return cb.call(self._do_get_contact, contact_id)
+
+    def _do_get_contact(self, contact_id: str) -> OdooContact:
         """
         Get contact information by ID.
         
@@ -186,6 +200,8 @@ class OdooClient:
         )
         
         response = self._request("GET", f"/contacts/{contact_id}")
+        
+        get_metrics().external_requests_total.inc(service="odoo", status="success")
         
         return OdooContact.from_api_response(response)
     

@@ -6,8 +6,14 @@ Defines all HTTP endpoints for the followup service.
 
 from typing import Any, Dict, Tuple
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, request
+from pydantic import ValidationError as PydanticValidationError
 
+from auto_followup.api.rate_limiting import rate_limit
+from auto_followup.api.validation import (
+    CancelFollowupsRequest,
+    ScheduleFollowupsRequest,
+)
 from auto_followup.core.exceptions import (
     BusinessError,
     DraftNotFoundError,
@@ -16,7 +22,9 @@ from auto_followup.core.exceptions import (
     MissingSentAtError,
     ValidationError,
 )
+from auto_followup.infrastructure.circuit_breaker import CircuitBreakerOpenError
 from auto_followup.infrastructure.logging import get_logger
+from auto_followup.infrastructure.metrics import get_metrics, metrics_endpoint
 from auto_followup.services import (
     CancellationService,
     ProcessorService,
@@ -86,11 +94,20 @@ def root() -> Tuple[Dict[str, Any], int]:
     return health_check()
 
 
+@api_bp.route("/metrics", methods=["GET"])
+def metrics() -> Tuple[Dict[str, Any], int]:
+    """
+    Prometheus metrics endpoint.
+    """
+    return metrics_endpoint()
+
+
 # ============================================================================
 # Scheduling Endpoints
 # ============================================================================
 
 @api_bp.route("/schedule-followups", methods=["POST"])
+@rate_limit
 def schedule_followups() -> Tuple[Dict[str, Any], int]:
     """
     Schedule followups for a sent draft.
@@ -102,18 +119,24 @@ def schedule_followups() -> Tuple[Dict[str, Any], int]:
         Scheduling result.
     """
     data = request.get_json() or {}
-    draft_id = data.get("draft_id")
     
-    if not draft_id:
+    # Validate request with Pydantic
+    try:
+        validated = ScheduleFollowupsRequest(**data)
+    except PydanticValidationError as e:
         return _error_response(
-            "Missing required field: draft_id",
+            str(e.errors()[0]["msg"]),
             400,
             "validation_error",
         )
     
     try:
         scheduler = SchedulerService()
-        result = scheduler.schedule_for_draft(draft_id)
+        result = scheduler.schedule_for_draft(validated.draft_id)
+        
+        # Record metrics
+        if result.scheduled_count > 0:
+            get_metrics().followups_scheduled_total.inc(result.scheduled_count)
         
         return _success_response({
             "draft_id": result.draft_id,
@@ -135,6 +158,7 @@ def schedule_followups() -> Tuple[Dict[str, Any], int]:
 # ============================================================================
 
 @api_bp.route("/cancel-followups", methods=["POST"])
+@rate_limit
 def cancel_followups() -> Tuple[Dict[str, Any], int]:
     """
     Cancel pending followups for a draft.
@@ -146,18 +170,24 @@ def cancel_followups() -> Tuple[Dict[str, Any], int]:
         Cancellation result.
     """
     data = request.get_json() or {}
-    draft_id = data.get("draft_id")
     
-    if not draft_id:
+    # Validate request with Pydantic
+    try:
+        validated = CancelFollowupsRequest(**data)
+    except PydanticValidationError as e:
         return _error_response(
-            "Missing required field: draft_id",
+            str(e.errors()[0]["msg"]),
             400,
             "validation_error",
         )
     
     try:
         cancellation = CancellationService()
-        result = cancellation.cancel_for_draft(draft_id)
+        result = cancellation.cancel_for_draft(validated.draft_id)
+        
+        # Record metrics
+        if result.cancelled_count > 0:
+            get_metrics().followups_cancelled_total.inc(result.cancelled_count)
         
         return _success_response({
             "draft_id": result.draft_id,
@@ -174,6 +204,7 @@ def cancel_followups() -> Tuple[Dict[str, Any], int]:
 # ============================================================================
 
 @api_bp.route("/process-pending-followups", methods=["POST"])
+@rate_limit
 def process_pending_followups() -> Tuple[Dict[str, Any], int]:
     """
     Process all followups that are due.
@@ -187,6 +218,11 @@ def process_pending_followups() -> Tuple[Dict[str, Any], int]:
         
         success_count = sum(1 for r in results if r.success)
         failure_count = len(results) - success_count
+        
+        # Record metrics
+        metrics = get_metrics()
+        metrics.followups_processed_total.inc(success_count, status="success")
+        metrics.followups_failed_total.inc(failure_count)
         
         return _success_response({
             "processed_count": len(results),
@@ -204,6 +240,12 @@ def process_pending_followups() -> Tuple[Dict[str, Any], int]:
             ],
         })
         
+    except CircuitBreakerOpenError as e:
+        logger.warning(
+            f"Circuit breaker open: {e}",
+            extra={"extra_fields": {"error_type": "circuit_breaker_open"}}
+        )
+        return _error_response(str(e), 503, "circuit_breaker_open")
     except ExternalServiceError as e:
         logger.error(
             f"External service error during processing: {e}",
@@ -217,6 +259,7 @@ def process_pending_followups() -> Tuple[Dict[str, Any], int]:
 # ============================================================================
 
 @api_bp.route("/retry-failed-followups", methods=["POST"])
+@rate_limit
 def retry_failed_followups() -> Tuple[Dict[str, Any], int]:
     """
     Retry all failed followup tasks.
@@ -230,6 +273,10 @@ def retry_failed_followups() -> Tuple[Dict[str, Any], int]:
         
         success_count = sum(1 for r in results if r.success)
         failure_count = len(results) - success_count
+        
+        # Record metrics
+        metrics = get_metrics()
+        metrics.followups_processed_total.inc(success_count, status="retried")
         
         return _success_response({
             "retried_count": len(results),
@@ -247,6 +294,12 @@ def retry_failed_followups() -> Tuple[Dict[str, Any], int]:
             ],
         })
         
+    except CircuitBreakerOpenError as e:
+        logger.warning(
+            f"Circuit breaker open: {e}",
+            extra={"extra_fields": {"error_type": "circuit_breaker_open"}}
+        )
+        return _error_response(str(e), 503, "circuit_breaker_open")
     except ExternalServiceError as e:
         logger.error(
             f"External service error during retry: {e}",

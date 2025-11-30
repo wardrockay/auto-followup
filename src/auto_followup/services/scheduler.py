@@ -80,11 +80,11 @@ class SchedulerService:
             List of FollowupTask instances (without doc_id).
         """
         tasks = []
-        schedule = settings.followup_schedule
+        schedule = settings.followup
         
-        for days_after in schedule.days:
+        for days_after in schedule.schedule_days:
             scheduled_date = add_business_days(sent_at, days_after)
-            followup_number = schedule.get_followup_number(days_after)
+            followup_number = schedule.days_to_followup_number.get(days_after, 0)
             
             task = FollowupTask(
                 doc_id="",  # Will be assigned by Firestore

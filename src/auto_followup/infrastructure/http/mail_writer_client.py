@@ -13,7 +13,13 @@ from urllib3.util.retry import Retry
 
 from auto_followup.config import settings
 from auto_followup.core.exceptions import MailWriterError
+from auto_followup.infrastructure.circuit_breaker import (
+    circuit_breaker,
+    get_circuit_breaker,
+    CircuitBreakerConfig,
+)
 from auto_followup.infrastructure.logging import get_logger, log_duration
+from auto_followup.infrastructure.metrics import get_metrics
 
 
 logger = get_logger(__name__)
@@ -84,8 +90,8 @@ class MailWriterClient:
             base_url: Mail-writer service URL.
             timeout: Request timeout in seconds.
         """
-        self._base_url = (base_url or settings.mail_writer.url).rstrip("/")
-        self._timeout = timeout or settings.mail_writer.timeout
+        self._base_url = (base_url or settings.mail_writer.base_url).rstrip("/")
+        self._timeout = timeout or settings.mail_writer.timeout_seconds
         self._session: Optional[requests.Session] = None
     
     @property
@@ -119,6 +125,17 @@ class MailWriterClient:
     
     @log_duration("mail_writer_generate_followup")
     def generate_followup(
+        self,
+        request_data: FollowupEmailRequest,
+    ) -> FollowupEmailResponse:
+        # Use circuit breaker for external call
+        cb = get_circuit_breaker(
+            "mail-writer",
+            CircuitBreakerConfig(failure_threshold=3, timeout_seconds=60.0),
+        )
+        return cb.call(self._do_generate_followup, request_data)
+
+    def _do_generate_followup(
         self,
         request_data: FollowupEmailRequest,
     ) -> FollowupEmailResponse:
@@ -170,9 +187,13 @@ class MailWriterClient:
                 }}
             )
             
+            # Record success metric
+            get_metrics().external_requests_total.inc(service="mail-writer", status="success")
+            
             return result
             
         except requests.exceptions.Timeout as e:
+            get_metrics().external_requests_total.inc(service="mail-writer", status="timeout")
             logger.error(
                 f"Mail-writer timeout",
                 extra={"extra_fields": {

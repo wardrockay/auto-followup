@@ -11,8 +11,9 @@ from typing import Optional
 
 from flask import Flask
 
-from auto_followup.api import api_bp
+from auto_followup.api.routes import api_bp
 from auto_followup.infrastructure.logging import log_request_context, logger
+from auto_followup.infrastructure.metrics import setup_metrics_middleware
 
 
 def _handle_sigterm(signum: int, frame) -> None:
@@ -49,8 +50,11 @@ def create_app(config: Optional[dict] = None) -> Flask:
     if config:
         app.config.update(config)
     
+    # Setup middleware
     log_request_context(app)
+    setup_metrics_middleware(app)
     
+    # Register blueprints
     app.register_blueprint(api_bp)
     
     logger.info(
