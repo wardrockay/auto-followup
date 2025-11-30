@@ -1,0 +1,2 @@
+# Production dependencies for Cloud Run deployment
+-r base.txt
