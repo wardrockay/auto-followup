@@ -13,9 +13,11 @@ from typing import Any, Dict, Optional
 
 class FollowupStatus(str, Enum):
     """Status of a followup task."""
-    PENDING = "pending"
+    SCHEDULED = "scheduled"  # Followup is scheduled, waiting to be processed
+    PENDING = "pending"      # Legacy status, kept for backward compatibility
     FAILED = "failed"
     DONE = "done"
+    SENT = "sent"           # Followup has been sent successfully
     CANCELLED = "cancelled"
 
 
@@ -88,8 +90,8 @@ class FollowupTask:
         doc_id: Firestore document ID.
         draft_id: Reference to the original draft.
         followup_number: Which followup in the sequence (1-4).
-        days_after_sent: Days after original email was sent.
-        scheduled_date: Date when the followup should be processed.
+        days_after_initial: Days after original email was sent.
+        scheduled_for: Date when the followup should be processed.
         status: Current status of the followup.
         created_at: When the task was created.
         processed_at: When the task was processed.
@@ -98,9 +100,9 @@ class FollowupTask:
     doc_id: str
     draft_id: str
     followup_number: int
-    days_after_sent: int
-    scheduled_date: datetime
-    status: FollowupStatus = FollowupStatus.PENDING
+    days_after_initial: int
+    scheduled_for: datetime
+    status: FollowupStatus = FollowupStatus.SCHEDULED
     created_at: Optional[datetime] = None
     processed_at: Optional[datetime] = None
     error_message: Optional[str] = None
@@ -126,12 +128,16 @@ class FollowupTask:
                 return value
             return None
         
+        # Support both old and new schema during migration
+        days_after = data.get("days_after_initial") or data.get("days_after_sent", 0)
+        scheduled = parse_datetime(data.get("scheduled_for")) or parse_datetime(data.get("scheduled_date")) or datetime.now()
+        
         return cls(
             doc_id=doc_id,
             draft_id=data.get("draft_id", ""),
             followup_number=data.get("followup_number", 0),
-            days_after_sent=data.get("days_after_sent", 0),
-            scheduled_date=parse_datetime(data.get("scheduled_date")) or datetime.now(),
+            days_after_initial=days_after,
+            scheduled_for=scheduled,
             status=FollowupStatus(data.get("status", "pending")),
             created_at=parse_datetime(data.get("created_at")),
             processed_at=parse_datetime(data.get("processed_at")),
@@ -148,8 +154,8 @@ class FollowupTask:
         data = {
             "draft_id": self.draft_id,
             "followup_number": self.followup_number,
-            "days_after_sent": self.days_after_sent,
-            "scheduled_date": self.scheduled_date,
+            "days_after_initial": self.days_after_initial,
+            "scheduled_for": self.scheduled_for,
             "status": self.status.value,
         }
         

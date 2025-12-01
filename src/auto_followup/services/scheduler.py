@@ -90,9 +90,9 @@ class SchedulerService:
                 doc_id="",  # Will be assigned by Firestore
                 draft_id="",  # Will be set by caller
                 followup_number=followup_number,
-                days_after_sent=days_after,
-                scheduled_date=scheduled_date,
-                status=FollowupStatus.PENDING,
+                days_after_initial=days_after,
+                scheduled_for=scheduled_date,
+                status=FollowupStatus.SCHEDULED,
                 created_at=now_utc(),
             )
             tasks.append(task)
@@ -142,8 +142,8 @@ class SchedulerService:
                 doc_id=task.doc_id,
                 draft_id=draft_id,
                 followup_number=task.followup_number,
-                days_after_sent=task.days_after_sent,
-                scheduled_date=task.scheduled_date,
+                days_after_initial=task.days_after_initial,
+                scheduled_for=task.scheduled_for,
                 status=task.status,
                 created_at=task.created_at,
             )
@@ -152,6 +152,9 @@ class SchedulerService:
         
         followup_ids = self._followup_repo.create_batch(tasks_with_draft_id)
         
+        # Update draft with followup_ids
+        self._draft_repo.update_followup_ids(draft_id, followup_ids)
+        
         logger.info(
             f"Scheduled {len(followup_ids)} followups for draft {draft_id}",
             extra={"extra_fields": {
@@ -159,7 +162,7 @@ class SchedulerService:
                 "scheduled_count": len(followup_ids),
                 "followup_ids": followup_ids,
                 "scheduled_dates": [
-                    t.scheduled_date.isoformat() for t in tasks_with_draft_id
+                    t.scheduled_for.isoformat() for t in tasks_with_draft_id
                 ],
             }}
         )
@@ -237,3 +240,201 @@ class SchedulerService:
         )
         
         return results
+    
+    @log_duration("sync_followup_ids")
+    def sync_missing_followup_ids(self) -> List[dict]:
+        """
+        Synchronize followup_ids for drafts that have followups but missing the field.
+        
+        Finds all drafts that have followup tasks in the followup collection
+        but don't have the followup_ids field populated in the draft document.
+        
+        Returns:
+            List of sync results with draft_id and followup_ids updated.
+        """
+        results = []
+        
+        # Get all draft IDs that have followups
+        draft_followups_map = self._followup_repo.get_all_draft_ids_with_followups()
+        
+        logger.info(
+            f"Starting sync for {len(draft_followups_map)} drafts with followups",
+            extra={"extra_fields": {"total_drafts": len(draft_followups_map)}}
+        )
+        
+        synced_count = 0
+        skipped_count = 0
+        error_count = 0
+        
+        for draft_id, followup_ids in draft_followups_map.items():
+            try:
+                # Get the draft to check current state
+                draft = self._draft_repo.get_by_id(draft_id)
+                
+                # Check if followup_ids already exists
+                existing_followup_ids = draft.raw_data.get("followup_ids")
+                
+                if existing_followup_ids and len(existing_followup_ids) > 0:
+                    logger.debug(
+                        f"Draft {draft_id} already has followup_ids, skipping",
+                        extra={"extra_fields": {
+                            "draft_id": draft_id,
+                            "existing_count": len(existing_followup_ids)
+                        }}
+                    )
+                    skipped_count += 1
+                    results.append({
+                        "draft_id": draft_id,
+                        "status": "skipped",
+                        "reason": "followup_ids already exists",
+                        "followup_ids": existing_followup_ids,
+                    })
+                    continue
+                
+                # Update draft with followup_ids
+                self._draft_repo.update_followup_ids(draft_id, followup_ids)
+                synced_count += 1
+                
+                results.append({
+                    "draft_id": draft_id,
+                    "status": "synced",
+                    "followup_ids": followup_ids,
+                    "count": len(followup_ids),
+                })
+                
+            except DraftNotFoundError:
+                error_count += 1
+                logger.warning(
+                    f"Draft {draft_id} not found, but has followups",
+                    extra={"extra_fields": {
+                        "draft_id": draft_id,
+                        "followup_count": len(followup_ids)
+                    }}
+                )
+                results.append({
+                    "draft_id": draft_id,
+                    "status": "error",
+                    "reason": "draft not found",
+                    "followup_ids": followup_ids,
+                })
+            except Exception as e:
+                error_count += 1
+                logger.error(
+                    f"Failed to sync followup_ids for draft {draft_id}: {e}",
+                    extra={"extra_fields": {
+                        "draft_id": draft_id,
+                        "error_type": type(e).__name__,
+                    }}
+                )
+                results.append({
+                    "draft_id": draft_id,
+                    "status": "error",
+                    "reason": str(e),
+                    "followup_ids": followup_ids,
+                })
+        
+        logger.info(
+            f"Sync complete: {synced_count} synced, {skipped_count} skipped, {error_count} errors",
+            extra={"extra_fields": {
+                "synced_count": synced_count,
+                "skipped_count": skipped_count,
+                "error_count": error_count,
+            }}
+        )
+        
+        return results
+    
+    @log_duration("update_followups_scheduled_flags")
+    def update_missing_followups_scheduled_flags(self) -> List[dict]:
+        """
+        Update followups_scheduled flag for drafts that have followup_ids but missing the flag.
+        
+        Returns:
+            List of update results.
+        """
+        results = []
+        updated_count = 0
+        error_count = 0
+        
+        logger.info("Starting update of missing followups_scheduled flags")
+        
+        for draft in self._draft_repo.get_drafts_with_followup_ids_missing_flag():
+            try:
+                self._draft_repo.update_followups_scheduled_flag(draft.doc_id)
+                updated_count += 1
+                
+                results.append({
+                    "draft_id": draft.doc_id,
+                    "status": "updated",
+                    "followup_ids": draft.raw_data.get("followup_ids", []),
+                })
+                
+            except Exception as e:
+                error_count += 1
+                logger.error(
+                    f"Failed to update followups_scheduled for draft {draft.doc_id}: {e}",
+                    extra={"extra_fields": {
+                        "draft_id": draft.doc_id,
+                        "error_type": type(e).__name__,
+                    }}
+                )
+                results.append({
+                    "draft_id": draft.doc_id,
+                    "status": "error",
+                    "reason": str(e),
+                })
+        
+        logger.info(
+            f"Update complete: {updated_count} updated, {error_count} errors",
+            extra={"extra_fields": {
+                "updated_count": updated_count,
+                "error_count": error_count,
+            }}
+        )
+        
+        return results
+    
+    @log_duration("migrate_pending_to_scheduled")
+    def migrate_pending_to_scheduled(self) -> dict:
+        """
+        Migrate all followups with status 'pending' to 'scheduled'.
+        
+        Returns:
+            Migration result with count.
+        """
+        logger.info("Starting migration of pending followups to scheduled status")
+        
+        migrated_count = self._followup_repo.migrate_pending_to_scheduled()
+        
+        logger.info(
+            f"Migration complete: {migrated_count} followups updated",
+            extra={"extra_fields": {"migrated_count": migrated_count}}
+        )
+        
+        return {
+            "migrated_count": migrated_count,
+            "message": f"Successfully migrated {migrated_count} followups from 'pending' to 'scheduled'"
+        }
+    
+    @log_duration("migrate_to_old_schema")
+    def migrate_to_old_schema(self) -> dict:
+        """
+        Migrate followup documents from new schema to old schema.
+        Changes days_after_sent -> days_after_initial and scheduled_date -> scheduled_for.
+        
+        Returns:
+            Dictionary with migration results.
+        """
+        logger.info("Starting migration to old schema")
+        
+        migrated_count = self._followup_repo.migrate_to_old_schema()
+        
+        logger.info(
+            f"Migration complete: {migrated_count} followups migrated to old schema",
+            extra={"extra_fields": {"migrated_count": migrated_count}}
+        )
+        
+        return {
+            "migrated_count": migrated_count,
+            "message": f"Successfully migrated {migrated_count} followups to old schema (days_after_initial, scheduled_for)"
+        }

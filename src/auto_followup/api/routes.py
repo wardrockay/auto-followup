@@ -106,6 +106,69 @@ def metrics() -> Tuple[Dict[str, Any], int]:
 # Scheduling Endpoints
 # ============================================================================
 
+@api_bp.route("/migrate-pending-to-scheduled", methods=["POST"])
+@rate_limit
+def migrate_pending_to_scheduled() -> Tuple[Dict[str, Any], int]:
+    """
+    Migrate all followups with status 'pending' to 'scheduled'.
+    
+    This is a one-time migration endpoint to align statuses with Prospector UI.
+    Changes all followup tasks from legacy 'pending' status to 'scheduled'.
+    
+    Returns:
+        Migration results.
+    """
+    try:
+        scheduler = SchedulerService()
+        result = scheduler.migrate_pending_to_scheduled()
+        
+        return _success_response({
+            "migrated_count": result["migrated_count"],
+            "message": result["message"],
+        })
+        
+    except ExternalServiceError as e:
+        logger.error(
+            f"External service error during migration: {e}",
+            extra={"extra_fields": {"error_type": type(e).__name__}}
+        )
+        return _error_response(str(e), 503, "external_service_error")
+
+
+@api_bp.route("/update-followups-scheduled-flags", methods=["POST"])
+@rate_limit
+def update_followups_scheduled_flags() -> Tuple[Dict[str, Any], int]:
+    """
+    Update followups_scheduled flag for drafts that have followup_ids but missing the flag.
+    
+    Finds all drafts that have followup_ids array but don't have the
+    followups_scheduled field set to true and updates them.
+    
+    Returns:
+        Update results summary.
+    """
+    try:
+        scheduler = SchedulerService()
+        results = scheduler.update_missing_followups_scheduled_flags()
+        
+        updated_count = sum(1 for r in results if r.get("status") == "updated")
+        error_count = sum(1 for r in results if r.get("status") == "error")
+        
+        return _success_response({
+            "total_drafts_processed": len(results),
+            "updated_count": updated_count,
+            "error_count": error_count,
+            "results": results,
+        })
+        
+    except ExternalServiceError as e:
+        logger.error(
+            f"External service error during update: {e}",
+            extra={"extra_fields": {"error_type": type(e).__name__}}
+        )
+        return _error_response(str(e), 503, "external_service_error")
+
+
 @api_bp.route("/schedule-missing-followups", methods=["POST"])
 @rate_limit
 def schedule_missing_followups() -> Tuple[Dict[str, Any], int]:
@@ -150,6 +213,42 @@ def schedule_missing_followups() -> Tuple[Dict[str, Any], int]:
     except ExternalServiceError as e:
         logger.error(
             f"External service error during bulk scheduling: {e}",
+            extra={"extra_fields": {"error_type": type(e).__name__}}
+        )
+        return _error_response(str(e), 503, "external_service_error")
+
+
+@api_bp.route("/sync-followup-ids", methods=["POST"])
+@rate_limit
+def sync_followup_ids() -> Tuple[Dict[str, Any], int]:
+    """
+    Synchronize followup_ids for drafts that have followups but missing the field.
+    
+    Finds all drafts that have followup tasks but don't have the followup_ids
+    field populated in the draft document and updates them.
+    
+    Returns:
+        Synchronization results summary.
+    """
+    try:
+        scheduler = SchedulerService()
+        results = scheduler.sync_missing_followup_ids()
+        
+        synced_count = sum(1 for r in results if r.get("status") == "synced")
+        skipped_count = sum(1 for r in results if r.get("status") == "skipped")
+        error_count = sum(1 for r in results if r.get("status") == "error")
+        
+        return _success_response({
+            "total_drafts_processed": len(results),
+            "synced_count": synced_count,
+            "skipped_count": skipped_count,
+            "error_count": error_count,
+            "results": results,
+        })
+        
+    except ExternalServiceError as e:
+        logger.error(
+            f"External service error during sync: {e}",
             extra={"extra_fields": {"error_type": type(e).__name__}}
         )
         return _error_response(str(e), 503, "external_service_error")
@@ -395,3 +494,34 @@ def handle_unexpected_error(error: Exception) -> Tuple[Dict[str, Any], int]:
         500,
         "internal_error",
     )
+
+
+@api_bp.route("/migrate-to-old-schema", methods=["POST"])
+@rate_limit
+def migrate_to_old_schema() -> Tuple[Dict[str, Any], int]:
+    """
+    Migrate followup documents from new schema to old schema.
+    Changes days_after_sent -> days_after_initial and scheduled_date -> scheduled_for.
+    
+    Returns:
+        Migration result with count of migrated documents.
+    """
+    try:
+        scheduler = SchedulerService()
+        result = scheduler.migrate_to_old_schema()
+        
+        return _success_response({
+            "migrated_count": result["migrated_count"],
+            "message": result["message"]
+        })
+        
+    except Exception as e:
+        logger.error(
+            f"Error during schema migration: {str(e)}",
+            extra={"extra_fields": {"error": str(e)}}
+        )
+        return _error_response(
+            f"Migration failed: {str(e)}",
+            500,
+            "migration_error"
+        )

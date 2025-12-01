@@ -126,6 +126,51 @@ Content-Type: application/json
 }
 ```
 
+### Schedule Missing Followups
+```http
+POST /schedule-missing-followups
+```
+
+Schedules followups for all sent drafts that don't have any followups yet.
+
+### Sync Followup IDs
+```http
+POST /sync-followup-ids
+```
+
+Synchronizes the `followup_ids` field for drafts that have followup tasks but are missing this field in the draft document.
+
+### Migrate Pending to Scheduled
+```http
+POST /migrate-pending-to-scheduled
+```
+
+One-time migration: converts all followup tasks with status `pending` to `scheduled` for compatibility with Prospector UI.
+
+### Update Followups Scheduled Flags
+```http
+POST /update-followups-scheduled-flags
+```
+
+Updates the `followups_scheduled` flag to `true` for drafts that have `followup_ids` but are missing this flag.
+
+### Migrate to Old Schema
+```http
+POST /migrate-to-old-schema
+```
+
+Migrates followup documents from new schema (`days_after_sent`, `scheduled_date`) to old schema (`days_after_initial`, `scheduled_for`). This ensures compatibility with the Prospector UI which expects the old field names.
+
+**Response:**
+```json
+{
+    "success": true,
+    "data": {
+        "migrated_count": 42,
+        "message": "Successfully migrated 42 followups to old schema (days_after_initial, scheduled_for)"
+    }
+}
+```
 ### Process Pending Followups
 ```http
 POST /process-pending-followups
@@ -230,6 +275,7 @@ Document structure for email drafts:
 | `followup_number` | int | Followup sequence number (0 for initial email) |
 | `is_followup` | boolean | Indicates if this is a followup email |
 | `followup_ids` | array | List of followup task IDs created for this draft |
+| `followups_scheduled` | boolean | Indicates if followup tasks have been scheduled |
 | `no_followup` | boolean | If true, no followups will be scheduled |
 | `reply_to_thread_id` | string | Gmail thread ID for replies |
 | `reply_to_message_id` | string | Gmail message ID for replies |
@@ -273,12 +319,14 @@ Document structure for followup tasks:
 |-------|------|-------------|
 | `draft_id` | string | Reference to original draft document |
 | `followup_number` | int | Followup sequence number (1-4) |
-| `days_after_sent` | int | Days after original email was sent |
-| `scheduled_date` | timestamp | When the followup should be processed |
-| `status` | string | Task status: `pending`, `failed`, `done`, `cancelled` |
+| `days_after_initial` | int | Days after original email was sent |
+| `scheduled_for` | timestamp | When the followup should be processed |
+| `status` | string | Task status: `scheduled`, `sent`, `failed`, `cancelled` |
 | `created_at` | timestamp | Task creation timestamp |
 | `processed_at` | timestamp | When the task was processed |
 | `error_message` | string | Error message if processing failed |
+
+**Note**: The service previously used `days_after_sent` and `scheduled_date` fields. Use the `/migrate-to-old-schema` endpoint to migrate existing documents to the current schema.
 
 ## 📋 License
 
