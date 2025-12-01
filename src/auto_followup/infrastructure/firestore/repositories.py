@@ -80,15 +80,47 @@ class DraftRepository:
     
     def get_sent_drafts(self) -> Generator[EmailDraft, None, None]:
         """
-        Get all drafts with status 'sent'.
+        Get all drafts with status 'sent' that are eligible for followups.
+        
+        Excludes:
+        - Drafts with no_followup=True
+        - Drafts that are themselves followups (is_followup=True or followup_number > 0)
+        - Drafts that already have followup_ids (already processed)
         
         Yields:
-            EmailDraft instances for sent drafts.
+            EmailDraft instances for sent drafts eligible for followups.
         """
-        query = self.collection.where("draft_status", "==", "sent")
+        query = self.collection.where("status", "==", "sent")
         
         for doc in query.stream():
-            yield EmailDraft.from_firestore(doc.id, doc.to_dict())
+            data = doc.to_dict()
+            
+            # Skip drafts marked as no_followup
+            if data.get("no_followup", False):
+                logger.debug(
+                    f"Skipping draft {doc.id}: no_followup=True",
+                    extra={"extra_fields": {"draft_id": doc.id}}
+                )
+                continue
+            
+            # Skip drafts that are themselves followups
+            if data.get("is_followup", False) or data.get("followup_number", 0) > 0:
+                logger.debug(
+                    f"Skipping draft {doc.id}: is a followup",
+                    extra={"extra_fields": {"draft_id": doc.id}}
+                )
+                continue
+            
+            # Skip drafts that already have followup_ids field
+            followup_ids = data.get("followup_ids")
+            if followup_ids and len(followup_ids) > 0:
+                logger.debug(
+                    f"Skipping draft {doc.id}: already has followup_ids",
+                    extra={"extra_fields": {"draft_id": doc.id, "followup_ids_count": len(followup_ids)}}
+                )
+                continue
+            
+            yield EmailDraft.from_firestore(doc.id, data)
 
 
 class FollowupRepository:

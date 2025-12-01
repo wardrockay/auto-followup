@@ -1,4 +1,9 @@
-.PHONY: help install install-dev test test-cov lint format type-check clean run docker-build docker-run
+.PHONY: help install install-dev test test-cov lint format type-check clean run docker-build docker-run deploy
+
+# Configuration
+PROJECT_ID ?= $(shell gcloud config get-value project)
+SERVICE_NAME = auto-followup
+REGION = europe-west1
 
 # Default target
 help:
@@ -14,6 +19,7 @@ help:
 	@echo "  make run           - Run development server"
 	@echo "  make docker-build  - Build Docker image"
 	@echo "  make docker-run    - Run Docker container"
+	@echo "  make deploy        - Deploy to Cloud Run"
 
 # Installation
 install:
@@ -76,3 +82,16 @@ docker-run:
 # Pre-commit hooks
 pre-commit:
 	pre-commit run --all-files
+
+# Deployment to Cloud Run
+deploy:
+	@echo "Deploying $(SERVICE_NAME) to Cloud Run..."
+	@echo "Project ID: $(PROJECT_ID)"
+	@echo "Region: $(REGION)"
+	@echo "Image: $(IMAGE_NAME)"
+	gcloud run deploy $(SERVICE_NAME) \
+		--region $(REGION) \
+		--source . \
+		--allow-unauthenticated
+	@echo "Deployment complete!"
+	@gcloud run services describe $(SERVICE_NAME) --region $(REGION) --format="value(status.url)"

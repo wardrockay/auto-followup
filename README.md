@@ -200,6 +200,86 @@ The default followup schedule is:
 
 This can be configured via the `FOLLOWUP_SCHEDULE` environment variable.
 
+## 📄 Firestore Schema
+
+### Collection: `email_drafts`
+
+Document structure for email drafts:
+
+#### Required Fields
+| Field | Type | Description |
+|-------|------|-------------|
+| `to` | string | Recipient email address |
+| `subject` | string | Email subject |
+| `body` | string | Email body content |
+| `created_at` | timestamp | Creation timestamp |
+| `status` | string | Draft status: `pending`, `approved`, `rejected`, `sent`, `bounced`, `replied` |
+| `version_group_id` | string | Version group identifier |
+
+#### Optional Fields
+| Field | Type | Description |
+|-------|------|-------------|
+| `x_external_id` | string | External system ID |
+| `odoo_id` | int/string | Odoo contact ID |
+| `odoo_contact_id` | string | Alternative Odoo contact ID |
+| `error_message` | string | Error message if applicable |
+
+#### Followup-Related Fields
+| Field | Type | Description |
+|-------|------|-------------|
+| `followup_number` | int | Followup sequence number (0 for initial email) |
+| `is_followup` | boolean | Indicates if this is a followup email |
+| `followup_ids` | array | List of followup task IDs created for this draft |
+| `no_followup` | boolean | If true, no followups will be scheduled |
+| `reply_to_thread_id` | string | Gmail thread ID for replies |
+| `reply_to_message_id` | string | Gmail message ID for replies |
+| `original_subject` | string | Original subject for followup threads |
+
+#### Contact Information
+| Field | Type | Description |
+|-------|------|-------------|
+| `contact_name` | string | Contact full name |
+| `contact_first_name` | string | Contact first name |
+| `partner_name` | string | Company name |
+| `company_name` | string | Alternative company name field |
+| `function` | string | Contact job title |
+| `website` | string | Company website |
+| `description` | string | Company description |
+| `recipient_email` | string | Alternative to `to` field |
+
+#### Sender Information
+| Field | Type | Description |
+|-------|------|-------------|
+| `sender_email` / `from_address` | string | Sender email address |
+| `sender_name` / `from_name` | string | Sender display name |
+
+#### Post-Send Fields
+| Field | Type | Description |
+|-------|------|-------------|
+| `sent_at` | timestamp | Sending timestamp |
+| `message_id` | string | Gmail message ID |
+| `thread_id` | string | Gmail thread ID |
+
+#### Additional Fields
+| Field | Type | Description |
+|-------|------|-------------|
+| `notes` | string | Additional notes |
+
+### Collection: `email_followups`
+
+Document structure for followup tasks:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `draft_id` | string | Reference to original draft document |
+| `followup_number` | int | Followup sequence number (1-4) |
+| `days_after_sent` | int | Days after original email was sent |
+| `scheduled_date` | timestamp | When the followup should be processed |
+| `status` | string | Task status: `pending`, `failed`, `done`, `cancelled` |
+| `created_at` | timestamp | Task creation timestamp |
+| `processed_at` | timestamp | When the task was processed |
+| `error_message` | string | Error message if processing failed |
+
 ## 📋 License
 
 MIT

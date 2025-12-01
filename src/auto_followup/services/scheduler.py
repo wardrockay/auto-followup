@@ -175,18 +175,42 @@ class SchedulerService:
         """
         Schedule followups for all sent drafts that don't have followups yet.
         
+        Only processes drafts that:
+        - Have status='sent'
+        - Don't have no_followup=True
+        - Are not themselves followups (is_followup=False, followup_number=0)
+        - Don't already have followup tasks scheduled
+        
         Returns:
             List of ScheduleResult for each processed draft.
         """
         results = []
         processed = 0
         errors = 0
+        skipped = 0
+        
+        logger.info("Starting bulk followup scheduling for sent drafts without followups")
         
         for draft in self._draft_repo.get_sent_drafts():
             try:
+                # Check if followups already exist (this is also checked in schedule_for_draft
+                # but we check here too to avoid unnecessary processing)
+                if self._followup_repo.has_existing_followups(draft.doc_id):
+                    logger.debug(
+                        f"Skipping draft {draft.doc_id}: already has followups",
+                        extra={"extra_fields": {"draft_id": draft.doc_id}}
+                    )
+                    skipped += 1
+                    continue
+                
                 result = self.schedule_for_draft(draft.doc_id)
                 results.append(result)
-                processed += 1
+                
+                if result.success:
+                    processed += 1
+                else:
+                    skipped += 1
+                    
             except Exception as e:
                 errors += 1
                 logger.error(
@@ -203,10 +227,12 @@ class SchedulerService:
                 ))
         
         logger.info(
-            f"Bulk scheduling complete: {processed} processed, {errors} errors",
+            f"Bulk scheduling complete: {processed} scheduled, {skipped} skipped, {errors} errors",
             extra={"extra_fields": {
-                "processed_count": processed,
+                "scheduled_count": processed,
+                "skipped_count": skipped,
                 "error_count": errors,
+                "total_drafts": len(results),
             }}
         )
         

@@ -59,11 +59,14 @@ class EmailDraft:
         if sent_at and hasattr(sent_at, "timestamp"):
             sent_at = datetime.fromtimestamp(sent_at.timestamp())
         
+        # Support both 'status' and 'draft_status' field names
+        status = data.get("status") or data.get("draft_status")
+        
         return cls(
             doc_id=doc_id,
             odoo_contact_id=data.get("odoo_contact_id"),
             sent_at=sent_at,
-            draft_status=data.get("draft_status"),
+            draft_status=status,
             recipient_email=data.get("recipient_email"),
             company_name=data.get("company_name"),
             contact_first_name=data.get("contact_first_name"),

@@ -106,6 +106,55 @@ def metrics() -> Tuple[Dict[str, Any], int]:
 # Scheduling Endpoints
 # ============================================================================
 
+@api_bp.route("/schedule-missing-followups", methods=["POST"])
+@rate_limit
+def schedule_missing_followups() -> Tuple[Dict[str, Any], int]:
+    """
+    Schedule followups for all sent drafts without any followup scheduled.
+    
+    This endpoint finds all prospection emails that were sent but don't have
+    any followup tasks scheduled yet, and creates the followup schedule for them.
+    
+    Returns:
+        Summary of scheduling results.
+    """
+    try:
+        scheduler = SchedulerService()
+        results = scheduler.schedule_all_sent_drafts()
+        
+        # Count successes and failures
+        success_count = sum(1 for r in results if r.success)
+        skipped_count = len(results) - success_count
+        total_scheduled = sum(r.scheduled_count for r in results)
+        
+        # Record metrics
+        if total_scheduled > 0:
+            get_metrics().followups_scheduled_total.inc(total_scheduled)
+        
+        return _success_response({
+            "processed_drafts": len(results),
+            "drafts_with_followups_added": success_count,
+            "drafts_skipped": skipped_count,
+            "total_followups_scheduled": total_scheduled,
+            "results": [
+                {
+                    "draft_id": r.draft_id,
+                    "scheduled_count": r.scheduled_count,
+                    "followup_ids": r.followup_ids,
+                    "skipped_reason": r.skipped_reason,
+                }
+                for r in results
+            ],
+        })
+        
+    except ExternalServiceError as e:
+        logger.error(
+            f"External service error during bulk scheduling: {e}",
+            extra={"extra_fields": {"error_type": type(e).__name__}}
+        )
+        return _error_response(str(e), 503, "external_service_error")
+
+
 @api_bp.route("/schedule-followups", methods=["POST"])
 @rate_limit
 def schedule_followups() -> Tuple[Dict[str, Any], int]:
