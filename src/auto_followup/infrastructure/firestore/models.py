@@ -129,7 +129,10 @@ class FollowupTask:
             return None
         
         # Support both old and new schema during migration
-        days_after = data.get("days_after_initial") or data.get("days_after_sent", 0)
+        # Priority: business_days_after > days_after_initial > days_after_sent
+        days_after = (data.get("business_days_after") or 
+                      data.get("days_after_initial") or 
+                      data.get("days_after_sent", 0))
         scheduled = parse_datetime(data.get("scheduled_for")) or parse_datetime(data.get("scheduled_date")) or datetime.now()
         
         return cls(
@@ -154,7 +157,7 @@ class FollowupTask:
         data = {
             "draft_id": self.draft_id,
             "followup_number": self.followup_number,
-            "days_after_initial": self.days_after_initial,
+            "business_days_after": self.days_after_initial,
             "scheduled_for": self.scheduled_for,
             "status": self.status.value,
         }

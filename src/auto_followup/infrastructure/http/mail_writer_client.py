@@ -5,7 +5,7 @@ Handles communication with the mail-writer service for generating followup email
 """
 
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -28,26 +28,58 @@ logger = get_logger(__name__)
 @dataclass(frozen=True)
 class FollowupEmailRequest:
     """Request data for generating a followup email."""
-    draft_id: str
+    # Internal tracking
+    draft_id: str  # Firestore draft ID for reference
+    
+    # Required fields for mail-writer
+    first_name: str
+    last_name: str
+    email: str
+    website: str
+    partner_name: str
+    x_external_id: str
     followup_number: int
-    odoo_contact_id: str
-    recipient_email: str
-    company_name: Optional[str] = None
-    contact_first_name: Optional[str] = None
+    
+    # Optional fields
+    function: str = ""
+    description: str = ""
+    version_group_id: str = ""
+    odoo_id: Optional[int] = None
+    reply_to_thread_id: str = ""
+    reply_to_message_id: str = ""
+    original_subject: str = ""
+    email_history: Optional[List[Dict[str, str]]] = None
+    
+    def __post_init__(self):
+        # Ensure email_history is a list
+        if self.email_history is None:
+            object.__setattr__(self, 'email_history', [])
     
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to API request payload."""
+        """Convert to API request payload matching mail-writer schema."""
         payload = {
-            "draft_id": self.draft_id,
+            "first_name": self.first_name,
+            "last_name": self.last_name,
+            "email": self.email,
+            "website": self.website,
+            "partner_name": self.partner_name,
+            "x_external_id": self.x_external_id,
             "followup_number": self.followup_number,
-            "odoo_contact_id": self.odoo_contact_id,
-            "recipient_email": self.recipient_email,
+            "function": self.function,
+            "description": self.description,
+            "version_group_id": self.version_group_id,
         }
         
-        if self.company_name:
-            payload["company_name"] = self.company_name
-        if self.contact_first_name:
-            payload["contact_first_name"] = self.contact_first_name
+        if self.odoo_id:
+            payload["odoo_id"] = self.odoo_id
+        if self.reply_to_thread_id:
+            payload["reply_to_thread_id"] = self.reply_to_thread_id
+        if self.reply_to_message_id:
+            payload["reply_to_message_id"] = self.reply_to_message_id
+        if self.original_subject:
+            payload["original_subject"] = self.original_subject
+        if self.email_history:
+            payload["email_history"] = self.email_history
         
         return payload
 
@@ -63,9 +95,16 @@ class FollowupEmailResponse:
     @classmethod
     def from_api_response(cls, data: Dict[str, Any]) -> "FollowupEmailResponse":
         """Create from API response."""
+        # Handle new format: {"status": "success", "draft": {...}}
+        status = data.get("status", "")
+        draft_data = data.get("draft", {})
+        
+        # Status can be "success" or "duplicate" (both are success cases)
+        is_success = status in ("success", "duplicate")
+        
         return cls(
-            success=data.get("success", False),
-            draft_id=data.get("draft_id"),
+            success=is_success,
+            draft_id=draft_data.get("draft_id") if draft_data else data.get("draft_id"),
             message=data.get("message"),
             error=data.get("error"),
         )
@@ -151,15 +190,17 @@ class MailWriterClient:
         Raises:
             MailWriterError: If request fails.
         """
-        endpoint = f"{self._base_url}/generate-followup"
+        endpoint = f"{self._base_url}/"
         payload = request_data.to_dict()
         
         logger.info(
-            f"Requesting followup generation",
+            f"Requesting followup generation - payload: {payload}",
             extra={"extra_fields": {
                 "draft_id": request_data.draft_id,
+                "x_external_id": request_data.x_external_id,
                 "followup_number": request_data.followup_number,
-                "recipient_email": request_data.recipient_email,
+                "recipient_email": request_data.email,
+                "full_payload": payload,
             }}
         )
         
@@ -171,17 +212,30 @@ class MailWriterClient:
             )
             response.raise_for_status()
             
-            result = FollowupEmailResponse.from_api_response(response.json())
+            response_data = response.json()
+            result = FollowupEmailResponse.from_api_response(response_data)
             
             if not result.success:
+                error_msg = result.error or result.message or "Unknown error"
+                logger.error(
+                    f"Mail-writer returned error",
+                    extra={"extra_fields": {
+                        "draft_id": request_data.draft_id,
+                        "x_external_id": request_data.x_external_id,
+                        "followup_number": request_data.followup_number,
+                        "error": error_msg,
+                        "full_response": response_data,
+                    }}
+                )
                 raise MailWriterError(
-                    f"Mail-writer returned error: {result.error}"
+                    f"Mail-writer returned error: {error_msg}"
                 )
             
             logger.info(
                 f"Followup generated successfully",
                 extra={"extra_fields": {
                     "draft_id": request_data.draft_id,
+                    "x_external_id": request_data.x_external_id,
                     "followup_number": request_data.followup_number,
                     "generated_draft_id": result.draft_id,
                 }}
@@ -198,6 +252,7 @@ class MailWriterClient:
                 f"Mail-writer timeout",
                 extra={"extra_fields": {
                     "draft_id": request_data.draft_id,
+                    "x_external_id": request_data.x_external_id,
                     "timeout": self._timeout,
                 }}
             )
@@ -208,6 +263,7 @@ class MailWriterClient:
                 f"Mail-writer HTTP error: {e.response.status_code}",
                 extra={"extra_fields": {
                     "draft_id": request_data.draft_id,
+                    "x_external_id": request_data.x_external_id,
                     "status_code": e.response.status_code,
                     "response_body": e.response.text[:500] if e.response.text else None,
                 }}
@@ -221,6 +277,7 @@ class MailWriterClient:
                 f"Mail-writer request failed: {e}",
                 extra={"extra_fields": {
                     "draft_id": request_data.draft_id,
+                    "x_external_id": request_data.x_external_id,
                     "error_type": type(e).__name__,
                 }}
             )

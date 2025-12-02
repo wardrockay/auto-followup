@@ -525,3 +525,403 @@ def migrate_to_old_schema() -> Tuple[Dict[str, Any], int]:
             500,
             "migration_error"
         )
+
+
+@api_bp.route("/debug/followup-fields", methods=["GET"])
+def debug_followup_fields() -> Tuple[Dict[str, Any], int]:
+    """
+    Debug endpoint that crawls all email_followups documents and returns unique fields.
+    
+    Returns:
+        List of unique field names found across all followup documents.
+    """
+    try:
+        from google.cloud import firestore
+        
+        db = firestore.Client()
+        followups_ref = db.collection("email_followups")
+        
+        unique_fields = set()
+        doc_count = 0
+        
+        # Stream all documents
+        for doc in followups_ref.stream():
+            doc_count += 1
+            doc_data = doc.to_dict()
+            
+            # Add all field names to the set
+            if doc_data:
+                unique_fields.update(doc_data.keys())
+        
+        # Convert set to sorted list for readable output
+        fields_list = sorted(list(unique_fields))
+        
+        return _success_response({
+            "total_documents": doc_count,
+            "unique_fields_count": len(fields_list),
+            "fields": fields_list
+        })
+        
+    except Exception as e:
+        logger.error(
+            f"Error crawling followup fields: {str(e)}",
+            extra={"extra_fields": {"error": str(e)}}
+        )
+        return _error_response(
+            f"Field crawl failed: {str(e)}",
+            500,
+            "crawl_error"
+        )
+
+
+@api_bp.route("/debug/cleanup-sent-followups", methods=["POST"])
+def debug_cleanup_sent_followups() -> Tuple[Dict[str, Any], int]:
+    """
+    Debug endpoint to mark J+3 followups as "sent" when subsequent followups exist.
+    
+    Logic:
+    - For each scheduled followup with days_after_initial=3
+    - Check if there's a draft with same x_external_id and followup_number > 1
+    - If yes, mark the J+3 followup as "sent"
+    
+    Returns:
+        Count of followups cleaned up and details.
+    """
+    try:
+        from google.cloud import firestore
+        from datetime import datetime, timezone
+        
+        db = firestore.Client()
+        followups_ref = db.collection("email_followups")
+        drafts_ref = db.collection("email_drafts")
+        
+        # Get all scheduled followups with days_after_initial=3
+        j3_query = (followups_ref
+            .where("status", "==", "scheduled")
+            .where("days_after_initial", "==", 3))
+        
+        cleaned_followups = []
+        
+        for followup_doc in j3_query.stream():
+            followup_data = followup_doc.to_dict()
+            draft_id = followup_data.get("draft_id")
+            
+            if not draft_id:
+                continue
+            
+            # Get the original draft to find x_external_id
+            try:
+                draft_doc = drafts_ref.document(draft_id).get()
+                if not draft_doc.exists:
+                    continue
+                
+                draft_data = draft_doc.to_dict()
+                x_external_id = draft_data.get("x_external_id")
+                
+                if not x_external_id:
+                    continue
+                
+                # Check if there's another draft with same x_external_id and followup_number > 1
+                subsequent_drafts_query = (drafts_ref
+                    .where("x_external_id", "==", x_external_id)
+                    .where("followup_number", ">", 1)
+                    .limit(1))
+                
+                subsequent_drafts = list(subsequent_drafts_query.stream())
+                
+                if subsequent_drafts:
+                    # Mark the J+3 followup as sent
+                    followups_ref.document(followup_doc.id).update({
+                        "status": "sent",
+                        "processed_at": datetime.now(timezone.utc),
+                        "cleanup_note": "Auto-marked as sent (subsequent followup exists)"
+                    })
+                    
+                    cleaned_followups.append({
+                        "followup_id": followup_doc.id,
+                        "draft_id": draft_id,
+                        "x_external_id": x_external_id,
+                        "to": followup_data.get("to"),
+                        "scheduled_for": followup_data.get("scheduled_for").isoformat() if followup_data.get("scheduled_for") else None,
+                        "subsequent_draft": subsequent_drafts[0].id
+                    })
+                    
+            except Exception as doc_error:
+                logger.warning(
+                    f"Error processing followup {followup_doc.id}: {str(doc_error)}",
+                    extra={"extra_fields": {
+                        "followup_id": followup_doc.id,
+                        "error": str(doc_error)
+                    }}
+                )
+                continue
+        
+        return _success_response({
+            "cleaned_count": len(cleaned_followups),
+            "followups_cleaned": cleaned_followups
+        })
+        
+    except Exception as e:
+        logger.error(
+            f"Error cleaning up sent followups: {str(e)}",
+            extra={"extra_fields": {"error": str(e)}}
+        )
+        return _error_response(
+            f"Cleanup failed: {str(e)}",
+            500,
+            "cleanup_error"
+        )
+
+
+@api_bp.route("/debug/due-followups", methods=["GET"])
+def debug_due_followups() -> Tuple[Dict[str, Any], int]:
+    """
+    Debug endpoint to check what followups are due for processing.
+    
+    Returns:
+        List of followups that should be processed with their details.
+    """
+    try:
+        from google.cloud import firestore
+        from datetime import datetime, timezone
+        
+        db = firestore.Client()
+        followups_ref = db.collection("email_followups")
+        
+        now = datetime.now(timezone.utc)
+        
+        # Get all scheduled followups
+        scheduled_query = followups_ref.where("status", "==", "scheduled")
+        scheduled_followups = []
+        
+        for doc in scheduled_query.stream():
+            data = doc.to_dict()
+            scheduled_for = data.get("scheduled_for")
+            
+            # Check if scheduled_for exists and its type
+            scheduled_for_info = {
+                "exists": scheduled_for is not None,
+                "type": str(type(scheduled_for).__name__),
+                "value": None,
+                "is_due": False
+            }
+            
+            if scheduled_for:
+                if hasattr(scheduled_for, 'isoformat'):
+                    scheduled_for_info["value"] = scheduled_for.isoformat()
+                    scheduled_for_info["is_due"] = scheduled_for <= now
+                else:
+                    scheduled_for_info["value"] = str(scheduled_for)
+            
+            scheduled_followups.append({
+                "id": doc.id,
+                "draft_id": data.get("draft_id"),
+                "status": data.get("status"),
+                "scheduled_for": scheduled_for_info,
+                "days_after_initial": data.get("days_after_initial"),
+                "to": data.get("to")
+            })
+        
+        # Sort by scheduled_for
+        scheduled_followups.sort(key=lambda x: x["scheduled_for"]["value"] or "")
+        
+        return _success_response({
+            "current_time": now.isoformat(),
+            "total_scheduled": len(scheduled_followups),
+            "due_count": sum(1 for f in scheduled_followups if f["scheduled_for"].get("is_due")),
+            "followups": scheduled_followups[:20]  # Limit to first 20
+        })
+        
+    except Exception as e:
+        logger.error(
+            f"Error checking due followups: {str(e)}",
+            extra={"extra_fields": {"error": str(e)}}
+        )
+        return _error_response(
+            f"Check failed: {str(e)}",
+            500,
+            "check_error"
+        )
+
+
+@api_bp.route("/migrate-followup-schema", methods=["POST"])
+@rate_limit
+def migrate_followup_schema() -> Tuple[Dict[str, Any], int]:
+    """
+    Migrate email_followups collection schema:
+    1. Rename days_after_initial → business_days_after
+    2. Set followup_number based on business_days_after (3→1, 7→2, 10→3, 180→4)
+    
+    Returns:
+        Migration results with counts.
+    """
+    try:
+        from google.cloud import firestore
+        
+        db = firestore.Client()
+        followups_ref = db.collection("email_followups")
+        
+        # Mapping from business days to followup number
+        days_to_followup = {
+            3: 1,
+            7: 2,
+            10: 3,
+            180: 4
+        }
+        
+        migrated_count = 0
+        skipped_count = 0
+        error_count = 0
+        errors = []
+        
+        # Stream all documents
+        for doc in followups_ref.stream():
+            try:
+                data = doc.to_dict()
+                updates = {}
+                
+                # 1. Handle days_after_initial → business_days_after
+                if "days_after_initial" in data and "business_days_after" not in data:
+                    updates["business_days_after"] = data["days_after_initial"]
+                elif "business_days_after" not in data:
+                    # If neither exists, skip this document
+                    skipped_count += 1
+                    continue
+                
+                # Get the business_days value (from existing or migration)
+                business_days = updates.get("business_days_after") or data.get("business_days_after")
+                
+                # 2. Set followup_number if missing or incorrect
+                if business_days in days_to_followup:
+                    expected_followup_number = days_to_followup[business_days]
+                    current_followup_number = data.get("followup_number")
+                    
+                    if current_followup_number != expected_followup_number:
+                        updates["followup_number"] = expected_followup_number
+                
+                # Apply updates if any
+                if updates:
+                    followups_ref.document(doc.id).update(updates)
+                    migrated_count += 1
+                    
+                    logger.info(
+                        f"Migrated followup {doc.id}",
+                        extra={"extra_fields": {
+                            "followup_id": doc.id,
+                            "updates": updates,
+                        }}
+                    )
+                else:
+                    skipped_count += 1
+                    
+            except Exception as doc_error:
+                error_count += 1
+                error_msg = f"Error migrating {doc.id}: {str(doc_error)}"
+                errors.append(error_msg)
+                logger.error(
+                    error_msg,
+                    extra={"extra_fields": {
+                        "followup_id": doc.id,
+                        "error": str(doc_error)
+                    }}
+                )
+        
+        return _success_response({
+            "migrated_count": migrated_count,
+            "skipped_count": skipped_count,
+            "error_count": error_count,
+            "errors": errors[:10],  # Limit error list
+            "message": f"Migrated {migrated_count} documents, skipped {skipped_count}, {error_count} errors"
+        })
+        
+    except Exception as e:
+        logger.error(
+            f"Error during followup schema migration: {str(e)}",
+            extra={"extra_fields": {"error": str(e)}}
+        )
+        return _error_response(
+            f"Migration failed: {str(e)}",
+            500,
+            "migration_error"
+        )
+
+
+@api_bp.route("/debug/email-history/<x_external_id>", methods=["GET"])
+def debug_email_history(x_external_id: str) -> Tuple[Dict[str, Any], int]:
+    """
+    Debug endpoint that retrieves email history for a given x_external_id.
+    
+    Simulates what auto-followup does when building email history for mail-writer.
+    
+    Args:
+        x_external_id: The external ID to lookup.
+        
+    Returns:
+        Email history with all details.
+    """
+    try:
+        from auto_followup.infrastructure.firestore import DraftRepository
+        
+        draft_repo = DraftRepository()
+        
+        # Get all drafts with same x_external_id
+        drafts = draft_repo.get_by_external_id(x_external_id)
+        
+        # Build email history like ProcessorService._get_email_history does
+        email_history = []
+        all_drafts_info = []
+        
+        for draft in drafts:
+            draft_data = draft.raw_data
+            
+            # Info for all drafts (for debugging)
+            all_drafts_info.append({
+                "draft_id": draft.doc_id,
+                "status": draft.draft_status,
+                "followup_number": draft_data.get("followup_number", 0),
+                "subject": draft_data.get("original_subject") or draft_data.get("subject", ""),
+                "has_body": bool(draft_data.get("body")),
+                "sent_at": draft_data.get("sent_at").isoformat() if draft_data.get("sent_at") and hasattr(draft_data.get("sent_at"), 'isoformat') else str(draft_data.get("sent_at")),
+            })
+            
+            # Filter for email history (only sent drafts)
+            if draft.draft_status == "sent":
+                subject = draft_data.get("original_subject") or draft_data.get("subject", "")
+                body = draft_data.get("body", "")
+                
+                if subject or body:
+                    email_history.append({
+                        "followup_number": draft_data.get("followup_number", 0),
+                        "subject": subject,
+                        "body": body[:300] + "..." if len(body) > 300 else body,  # Truncate for readability
+                    })
+        
+        # Sort by followup_number (oldest first)
+        email_history.sort(key=lambda x: x.get("followup_number", 0))
+        
+        return _success_response({
+            "x_external_id": x_external_id,
+            "total_drafts_found": len(drafts),
+            "sent_drafts_count": len(email_history),
+            "all_drafts": all_drafts_info,
+            "email_history": email_history,
+            "email_history_for_mail_writer": [
+                {"subject": e["subject"], "body": e["body"]} 
+                for e in email_history
+            ],
+        })
+        
+    except Exception as e:
+        logger.error(
+            f"Error retrieving email history for {x_external_id}: {str(e)}",
+            extra={"extra_fields": {
+                "x_external_id": x_external_id,
+                "error": str(e)
+            }}
+        )
+        return _error_response(
+            f"Failed to retrieve email history: {str(e)}",
+            500,
+            "history_retrieval_error"
+        )
+

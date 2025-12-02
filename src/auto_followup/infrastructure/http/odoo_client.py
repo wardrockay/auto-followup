@@ -25,27 +25,37 @@ logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
-class OdooContact:
-    """Contact information from Odoo."""
-    id: str
-    email: Optional[str] = None
-    name: Optional[str] = None
-    company_name: Optional[str] = None
-    phone: Optional[str] = None
-    mobile: Optional[str] = None
-    raw_data: Dict[str, Any] = field(default_factory=dict)
+class OdooLead:
+    """Lead information from Odoo CRM."""
+    odoo_id: int
+    first_name: str
+    last_name: str
+    email: str
+    website: str
+    partner_name: str
+    function: str
+    description: str
+    x_external_id: str
     
     @classmethod
-    def from_api_response(cls, data: Dict[str, Any]) -> "OdooContact":
-        """Create from API response."""
+    def from_api_response(cls, data: Dict[str, Any]) -> "OdooLead":
+        """Create from Odoo search_read response."""
+        # Split contact_name into first_name and last_name
+        contact_name = data.get("contact_name", "")
+        name_parts = contact_name.split(" ", 1) if contact_name else ["", ""]
+        first_name = name_parts[0] if len(name_parts) > 0 else ""
+        last_name = name_parts[1] if len(name_parts) > 1 else ""
+        
         return cls(
-            id=str(data.get("id", "")),
-            email=data.get("email"),
-            name=data.get("name"),
-            company_name=data.get("company_name"),
-            phone=data.get("phone"),
-            mobile=data.get("mobile"),
-            raw_data=data,
+            odoo_id=data.get("id", 0),
+            first_name=first_name,
+            last_name=last_name,
+            email=data.get("email_normalized", ""),
+            website=data.get("website", ""),
+            partner_name=data.get("partner_name", ""),
+            function=data.get("function", ""),
+            description=data.get("description", ""),
+            x_external_id=data.get("x_external_id", ""),
         )
 
 
@@ -172,62 +182,65 @@ class OdooClient:
             )
             raise OdooError(f"Odoo API request failed: {e}") from e
     
-    @log_duration("odoo_get_contact")
-    def get_contact(self, contact_id: str) -> OdooContact:
-        """Get contact with circuit breaker protection."""
-        cb = get_circuit_breaker(
-            "odoo-api",
-            CircuitBreakerConfig(failure_threshold=5, timeout_seconds=30.0),
-        )
-        return cb.call(self._do_get_contact, contact_id)
-
-    def _do_get_contact(self, contact_id: str) -> OdooContact:
+    @log_duration("odoo_get_lead")
+    def get_lead_by_external_id(self, x_external_id: str) -> Optional[OdooLead]:
         """
-        Get contact information by ID.
+        Get lead information by x_external_id using search_read.
         
         Args:
-            contact_id: Odoo contact ID.
+            x_external_id: External ID (Pharow ID).
             
         Returns:
-            OdooContact instance.
+            OdooLead instance or None if not found.
             
         Raises:
-            OdooError: If contact retrieval fails.
+            OdooError: If lead retrieval fails.
         """
         logger.info(
-            f"Fetching Odoo contact {contact_id}",
-            extra={"extra_fields": {"contact_id": contact_id}}
+            f"Fetching lead from Odoo by x_external_id: {x_external_id}",
+            extra={"extra_fields": {"x_external_id": x_external_id}}
         )
         
-        response = self._request("GET", f"/contacts/{contact_id}")
-        
-        get_metrics().external_requests_total.inc(service="odoo", status="success")
-        
-        return OdooContact.from_api_response(response)
-    
-    @log_duration("odoo_get_contact_info")
-    def get_contact_info_for_followup(
-        self,
-        contact_id: str,
-    ) -> Dict[str, Any]:
-        """
-        Get contact info formatted for followup email generation.
-        
-        Args:
-            contact_id: Odoo contact ID.
-            
-        Returns:
-            Dictionary with contact information for mail-writer.
-        """
-        contact = self.get_contact(contact_id)
-        
-        return {
-            "contact_id": contact.id,
-            "email": contact.email,
-            "name": contact.name,
-            "company_name": contact.company_name,
-            "phone": contact.phone or contact.mobile,
+        payload = {
+            "domain": [["x_external_id", "ilike", x_external_id]],
+            "fields": [
+                "id", "email_normalized", "website", "contact_name",
+                "partner_name", "function", "description", "x_external_id"
+            ]
         }
+        
+        try:
+            response = self._request(
+                "POST",
+                "/json/2/crm.lead/search_read",
+                json=payload,
+            )
+            
+            if not response or len(response) == 0:
+                logger.warning(
+                    f"No lead found in Odoo for x_external_id: {x_external_id}",
+                    extra={"extra_fields": {"x_external_id": x_external_id}}
+                )
+                get_metrics().external_requests_total.inc(service="odoo", status="not_found")
+                return None
+            
+            lead = OdooLead.from_api_response(response[0])
+            
+            logger.info(
+                f"Successfully fetched lead from Odoo: odoo_id={lead.odoo_id}, email={lead.email}",
+                extra={"extra_fields": {
+                    "x_external_id": x_external_id,
+                    "odoo_id": lead.odoo_id,
+                    "email": lead.email,
+                }}
+            )
+            
+            get_metrics().external_requests_total.inc(service="odoo", status="success")
+            return lead
+            
+        except OdooError:
+            get_metrics().external_requests_total.inc(service="odoo", status="error")
+            raise
     
     def close(self) -> None:
         """Close the HTTP session."""

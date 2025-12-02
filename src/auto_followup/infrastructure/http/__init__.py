@@ -9,7 +9,7 @@ External service clients:
 from auto_followup.infrastructure.http.odoo_client import (
     get_odoo_client,
     OdooClient,
-    OdooContact,
+    OdooLead,
 )
 from auto_followup.infrastructure.http.mail_writer_client import (
     FollowupEmailRequest,
@@ -23,7 +23,7 @@ __all__ = [
     # Odoo
     "get_odoo_client",
     "OdooClient",
-    "OdooContact",
+    "OdooLead",
     # Mail-writer
     "FollowupEmailRequest",
     "FollowupEmailResponse",

@@ -133,6 +133,45 @@ class DraftRepository:
             extra={"extra_fields": {"draft_id": draft_id}}
         )
     
+    def get_by_external_id(self, x_external_id: str) -> List[EmailDraft]:
+        """
+        Get all drafts with the same x_external_id.
+        
+        Used to retrieve email history for followups.
+        
+        Args:
+            x_external_id: External ID (Pharow ID).
+            
+        Returns:
+            List of EmailDraft instances.
+        """
+        drafts = []
+        
+        try:
+            docs = self.collection.where("x_external_id", "==", x_external_id).stream()
+            
+            for doc in docs:
+                drafts.append(EmailDraft.from_firestore(doc.id, doc.to_dict()))
+            
+            logger.info(
+                f"Found {len(drafts)} drafts with x_external_id={x_external_id}",
+                extra={"extra_fields": {
+                    "x_external_id": x_external_id,
+                    "count": len(drafts),
+                }}
+            )
+            
+        except Exception as e:
+            logger.error(
+                f"Error retrieving drafts by x_external_id: {str(e)}",
+                extra={"extra_fields": {
+                    "x_external_id": x_external_id,
+                    "error": str(e),
+                }}
+            )
+        
+        return drafts
+    
     def get_sent_drafts(self) -> Generator[EmailDraft, None, None]:
         """
         Get all drafts with status 'sent' that are eligible for followups.
@@ -349,20 +388,63 @@ class FollowupRepository:
         """
         cutoff = before or datetime.now(timezone.utc)
         
+        logger.info(
+            f"get_due_followups called with status={status.value}, cutoff={cutoff.isoformat()}",
+            extra={"extra_fields": {
+                "status": status.value,
+                "cutoff": cutoff.isoformat(),
+            }}
+        )
+        
         # Query for both 'scheduled' (new) and 'pending' (legacy) if status is SCHEDULED
         statuses_to_query = [status.value]
         if status == FollowupStatus.SCHEDULED:
             statuses_to_query.append(FollowupStatus.PENDING.value)
         
+        total_yielded = 0
         for status_value in statuses_to_query:
-            query = (
-                self.collection
-                .where("status", "==", status_value)
-                .where("scheduled_date", "<=", cutoff)
+            logger.info(
+                f"Querying followups with status={status_value}",
+                extra={"extra_fields": {"status_value": status_value}}
             )
             
-            for doc in query.stream():
-                yield FollowupTask.from_firestore(doc.id, doc.to_dict())
+            try:
+                # Use composite index: status (==) then scheduled_for (<=)
+                query = (
+                    self.collection
+                    .where("status", "==", status_value)
+                    .where("scheduled_for", "<=", cutoff)
+                    .order_by("scheduled_for")
+                )
+                
+                doc_count = 0
+                for doc in query.stream():
+                    doc_count += 1
+                    total_yielded += 1
+                    yield FollowupTask.from_firestore(doc.id, doc.to_dict())
+                
+                logger.info(
+                    f"Query for status={status_value} returned {doc_count} documents",
+                    extra={"extra_fields": {
+                        "status_value": status_value,
+                        "doc_count": doc_count,
+                    }}
+                )
+            except Exception as e:
+                logger.error(
+                    f"Error querying followups with status={status_value}: {str(e)}",
+                    extra={"extra_fields": {
+                        "status_value": status_value,
+                        "error": str(e),
+                        "error_type": type(e).__name__,
+                    }}
+                )
+                raise
+        
+        logger.info(
+            f"get_due_followups yielded {total_yielded} total followups",
+            extra={"extra_fields": {"total_yielded": total_yielded}}
+        )
     
     def get_failed_followups(self) -> Generator[FollowupTask, None, None]:
         """
