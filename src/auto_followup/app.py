@@ -10,6 +10,7 @@ import sys
 from typing import Optional
 
 from flask import Flask
+from flask_cors import CORS
 
 from auto_followup.api.routes import api_bp
 from auto_followup.infrastructure.logging import log_request_context, logger
@@ -49,6 +50,9 @@ def create_app(config: Optional[dict] = None) -> Flask:
     
     if config:
         app.config.update(config)
+    
+    # Enable CORS for cross-origin requests from prospector-ui
+    CORS(app, resources={r"/*": {"origins": "*"}})
     
     # Setup middleware
     log_request_context(app)

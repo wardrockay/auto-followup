@@ -133,20 +133,23 @@ def add_business_days(start_date: datetime, business_days: int) -> datetime:
     """
     Add a number of business days to a date.
     
+    Supports both positive (future) and negative (past) business days.
     The resulting date is guaranteed to be a business day and set to 1:00 AM UTC.
     
     Args:
         start_date: The starting datetime.
-        business_days: Number of business days to add.
+        business_days: Number of business days to add (positive) or subtract (negative).
         
     Returns:
         The resulting datetime after adding business days, set to 1:00 AM UTC.
     """
     current = start_date
+    days_to_add = abs(business_days)
+    direction = 1 if business_days >= 0 else -1
     days_added = 0
     
-    while days_added < business_days:
-        current = current + timedelta(days=1)
+    while days_added < days_to_add:
+        current = current + timedelta(days=direction)
         if is_business_day(current):
             days_added += 1
     

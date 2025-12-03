@@ -1013,3 +1013,642 @@ def fix_followup_times() -> Tuple[Dict[str, Any], int]:
         )
 
 
+@api_bp.route("/debug/check-followups-draft-id", methods=["GET"])
+def debug_check_followups_draft_id() -> Tuple[Dict[str, Any], int]:
+    """
+    Vérifier si tous les documents de email_followups possèdent le champ draft_id.
+    
+    Returns:
+        Statistiques sur la présence du champ draft_id dans les followups.
+    """
+    try:
+        from google.cloud import firestore
+        
+        db = firestore.Client()
+        followups_ref = db.collection("email_followups")
+        
+        total_count = 0
+        with_draft_id = 0
+        without_draft_id = []
+        
+        for doc in followups_ref.stream():
+            total_count += 1
+            followup_data = doc.to_dict()
+            
+            if "draft_id" in followup_data and followup_data.get("draft_id"):
+                with_draft_id += 1
+            else:
+                without_draft_id.append({
+                    "followup_id": doc.id,
+                    "scheduled_for": followup_data.get("scheduled_for").isoformat() if followup_data.get("scheduled_for") and hasattr(followup_data.get("scheduled_for"), 'isoformat') else str(followup_data.get("scheduled_for")),
+                    "status": followup_data.get("status"),
+                    "x_external_id": followup_data.get("x_external_id"),
+                    "followup_number": followup_data.get("followup_number"),
+                    "days_after_initial": followup_data.get("days_after_initial"),
+                    "business_days_after": followup_data.get("business_days_after"),
+                })
+        
+        logger.info(
+            f"Vérification email_followups: {total_count} total, {with_draft_id} avec draft_id, {len(without_draft_id)} sans"
+        )
+        
+        return _success_response({
+            "total_followups": total_count,
+            "with_draft_id": with_draft_id,
+            "without_draft_id_count": len(without_draft_id),
+            "without_draft_id": without_draft_id,
+            "percentage_with_draft_id": round((with_draft_id / total_count * 100), 2) if total_count > 0 else 0
+        })
+        
+    except Exception as e:
+        logger.error(
+            f"Erreur lors de la vérification des followups: {str(e)}",
+            extra={"extra_fields": {"error": str(e)}}
+        )
+        return _error_response(
+            f"Vérification échouée: {str(e)}",
+            500,
+            "check_error"
+        )
+
+
+@api_bp.route("/debug/followups-status-values", methods=["GET"])
+def debug_followups_status_values() -> Tuple[Dict[str, Any], int]:
+    """
+    Récupérer toutes les valeurs uniques du champ status dans email_followups.
+    
+    Returns:
+        Liste des valeurs uniques de status avec leur nombre d'occurrences.
+    """
+    try:
+        from google.cloud import firestore
+        
+        db = firestore.Client()
+        followups_ref = db.collection("email_followups")
+        
+        status_counts = {}
+        total_count = 0
+        documents_without_status = 0
+        
+        for doc in followups_ref.stream():
+            total_count += 1
+            followup_data = doc.to_dict()
+            
+            status = followup_data.get("status")
+            
+            if status:
+                if status in status_counts:
+                    status_counts[status] += 1
+                else:
+                    status_counts[status] = 1
+            else:
+                documents_without_status += 1
+        
+        # Trier par nombre d'occurrences (décroissant)
+        sorted_statuses = sorted(
+            status_counts.items(),
+            key=lambda x: x[1],
+            reverse=True
+        )
+        
+        logger.info(
+            f"Valeurs status trouvées: {len(status_counts)} valeurs uniques sur {total_count} documents"
+        )
+        
+        return _success_response({
+            "total_documents": total_count,
+            "unique_status_count": len(status_counts),
+            "documents_without_status": documents_without_status,
+            "status_values": [
+                {"status": status, "count": count}
+                for status, count in sorted_statuses
+            ],
+        })
+        
+    except Exception as e:
+        logger.error(
+            f"Erreur lors de la récupération des valeurs status: {str(e)}",
+            extra={"extra_fields": {"error": str(e)}}
+        )
+        return _error_response(
+            f"Récupération échouée: {str(e)}",
+            500,
+            "status_check_error"
+        )
+
+
+@api_bp.route("/migrate-followups-status", methods=["POST"])
+@rate_limit
+def migrate_followups_status() -> Tuple[Dict[str, Any], int]:
+    """
+    Migrer les valeurs du champ status dans email_followups:
+    - "sent" → "done"
+    - "error" → "failed"
+    
+    Returns:
+        Nombre de documents migrés pour chaque changement.
+    """
+    try:
+        from google.cloud import firestore
+        
+        db = firestore.Client()
+        followups_ref = db.collection("email_followups")
+        
+        sent_to_done_count = 0
+        error_to_failed_count = 0
+        total_checked = 0
+        errors = []
+        
+        for doc in followups_ref.stream():
+            try:
+                total_checked += 1
+                followup_data = doc.to_dict()
+                status = followup_data.get("status")
+                
+                if status == "sent":
+                    doc.reference.update({"status": "done"})
+                    sent_to_done_count += 1
+                    logger.info(f"Migrated followup {doc.id}: sent → done")
+                    
+                elif status == "error":
+                    doc.reference.update({"status": "failed"})
+                    error_to_failed_count += 1
+                    logger.info(f"Migrated followup {doc.id}: error → failed")
+                    
+            except Exception as doc_error:
+                error_msg = f"Erreur pour {doc.id}: {str(doc_error)}"
+                errors.append(error_msg)
+                logger.error(
+                    error_msg,
+                    extra={"extra_fields": {
+                        "followup_id": doc.id,
+                        "error": str(doc_error)
+                    }}
+                )
+        
+        total_migrated = sent_to_done_count + error_to_failed_count
+        
+        logger.info(
+            f"Migration status terminée: {total_migrated} documents migrés sur {total_checked}"
+        )
+        
+        return _success_response({
+            "total_checked": total_checked,
+            "total_migrated": total_migrated,
+            "sent_to_done": sent_to_done_count,
+            "error_to_failed": error_to_failed_count,
+            "error_count": len(errors),
+            "errors": errors[:10] if errors else None,
+            "message": f"Migré {sent_to_done_count} 'sent'→'done' et {error_to_failed_count} 'error'→'failed'"
+        })
+        
+    except Exception as e:
+        logger.error(
+            f"Erreur lors de la migration des status: {str(e)}",
+            extra={"extra_fields": {"error": str(e)}}
+        )
+        return _error_response(
+            f"Migration échouée: {str(e)}",
+            500,
+            "migration_error"
+        )
+
+
+@api_bp.route("/migrate-link-followups-to-initial", methods=["POST"])
+@rate_limit
+def migrate_link_followups_to_initial() -> Tuple[Dict[str, Any], int]:
+    """
+    Lier tous les drafts de relance (followup_number > 0) à leur draft initial.
+    Ajoute le champ initial_draft_id sur tous les drafts de relance.
+    
+    Logique:
+    1. Pour les followups "done": utilise email_followups.draft_id comme référence exacte
+    2. Pour les autres relances: recherche par x_external_id + to + followup_number == 0
+    3. Propage aussi sur toutes les versions (via version_group_id)
+    
+    Returns:
+        Statistiques de migration avec détails.
+    """
+    try:
+        from google.cloud import firestore
+        
+        db = firestore.Client()
+        drafts_ref = db.collection("email_drafts")
+        followups_ref = db.collection("email_followups")
+        
+        linked_count = 0
+        version_linked_count = 0
+        not_linkable_count = 0
+        errors = []
+        not_linkable_drafts = []
+        
+        # === PHASE 1: Lier les relances via email_followups (done) ===
+        logger.info("Phase 1: Traitement des followups 'done'")
+        
+        done_followups = followups_ref.where("status", "==", "done").stream()
+        
+        for followup_doc in done_followups:
+            try:
+                followup_data = followup_doc.to_dict()
+                initial_draft_id = followup_data.get("draft_id")  # Le draft initial
+                x_external_id = followup_data.get("x_external_id")
+                to_email = followup_data.get("to")
+                followup_number = followup_data.get("followup_number") or followup_data.get("business_days_after")
+                
+                if not initial_draft_id or not x_external_id or not to_email:
+                    continue
+                
+                # Trouver le draft de relance correspondant
+                # (même x_external_id, to, et followup_number correspondant)
+                relance_query = (drafts_ref
+                    .where("x_external_id", "==", x_external_id)
+                    .where("to", "==", to_email)
+                    .where("followup_number", ">", 0))
+                
+                for relance_doc in relance_query.stream():
+                    relance_data = relance_doc.to_dict()
+                    
+                    # Vérifier si déjà lié
+                    if relance_data.get("initial_draft_id"):
+                        continue
+                    
+                    # Mettre à jour avec initial_draft_id
+                    relance_doc.reference.update({"initial_draft_id": initial_draft_id})
+                    linked_count += 1
+                    
+                    # Propager sur toutes les versions via version_group_id
+                    version_group_id = relance_data.get("version_group_id")
+                    if version_group_id:
+                        version_query = (drafts_ref
+                            .where("version_group_id", "==", version_group_id))
+                        
+                        for version_doc in version_query.stream():
+                            version_data = version_doc.to_dict()
+                            
+                            # Ne pas mettre à jour le draft qu'on vient de traiter
+                            if version_doc.id == relance_doc.id:
+                                continue
+                            
+                            # Ne mettre à jour que si pas déjà lié
+                            if not version_data.get("initial_draft_id"):
+                                version_doc.reference.update({"initial_draft_id": initial_draft_id})
+                                version_linked_count += 1
+                    
+                    logger.info(
+                        f"Lié relance {relance_doc.id} → initial {initial_draft_id}",
+                        extra={"extra_fields": {
+                            "relance_id": relance_doc.id,
+                            "initial_id": initial_draft_id,
+                            "x_external_id": x_external_id
+                        }}
+                    )
+                    
+            except Exception as doc_error:
+                error_msg = f"Erreur followup {followup_doc.id}: {str(doc_error)}"
+                errors.append(error_msg)
+                logger.error(error_msg)
+        
+        # === PHASE 2: Lier les relances restantes (non done ou brouillons) ===
+        logger.info("Phase 2: Traitement des relances restantes")
+        
+        # Récupérer tous les drafts de relance sans initial_draft_id
+        relance_drafts = drafts_ref.where("followup_number", ">", 0).stream()
+        
+        for relance_doc in relance_drafts:
+            try:
+                relance_data = relance_doc.to_dict()
+                
+                # Skip si déjà lié (traité en phase 1)
+                if relance_data.get("initial_draft_id"):
+                    continue
+                
+                x_external_id = relance_data.get("x_external_id")
+                to_email = relance_data.get("to")
+                
+                # Vérifier qu'on a les champs nécessaires
+                if not x_external_id or not to_email:
+                    not_linkable_count += 1
+                    not_linkable_drafts.append({
+                        "draft_id": relance_doc.id,
+                        "reason": "missing_x_external_id_or_to",
+                        "x_external_id": x_external_id,
+                        "to": to_email,
+                        "followup_number": relance_data.get("followup_number")
+                    })
+                    continue
+                
+                # Chercher le draft initial (followup_number == 0 ou None)
+                initial_query = (drafts_ref
+                    .where("x_external_id", "==", x_external_id)
+                    .where("to", "==", to_email)
+                    .limit(10))  # Limiter pour performance
+                
+                initial_draft_id = None
+                for initial_doc in initial_query.stream():
+                    initial_data = initial_doc.to_dict()
+                    followup_num = initial_data.get("followup_number", 0)
+                    
+                    if followup_num == 0:
+                        initial_draft_id = initial_doc.id
+                        break
+                
+                if initial_draft_id:
+                    # Mettre à jour la relance
+                    relance_doc.reference.update({"initial_draft_id": initial_draft_id})
+                    linked_count += 1
+                    
+                    # Propager sur toutes les versions
+                    version_group_id = relance_data.get("version_group_id")
+                    if version_group_id:
+                        version_query = (drafts_ref
+                            .where("version_group_id", "==", version_group_id))
+                        
+                        for version_doc in version_query.stream():
+                            if version_doc.id == relance_doc.id:
+                                continue
+                            
+                            version_data = version_doc.to_dict()
+                            if not version_data.get("initial_draft_id"):
+                                version_doc.reference.update({"initial_draft_id": initial_draft_id})
+                                version_linked_count += 1
+                    
+                    logger.info(
+                        f"Lié relance {relance_doc.id} → initial {initial_draft_id}",
+                        extra={"extra_fields": {
+                            "relance_id": relance_doc.id,
+                            "initial_id": initial_draft_id
+                        }}
+                    )
+                else:
+                    # Pas de draft initial trouvé
+                    not_linkable_count += 1
+                    not_linkable_drafts.append({
+                        "draft_id": relance_doc.id,
+                        "reason": "no_initial_draft_found",
+                        "x_external_id": x_external_id,
+                        "to": to_email,
+                        "followup_number": relance_data.get("followup_number")
+                    })
+                    
+            except Exception as doc_error:
+                error_msg = f"Erreur draft {relance_doc.id}: {str(doc_error)}"
+                errors.append(error_msg)
+                logger.error(error_msg)
+        
+        total_linked = linked_count + version_linked_count
+        
+        logger.info(
+            f"Migration terminée: {linked_count} relances liées, {version_linked_count} versions liées, {not_linkable_count} non rapprochables"
+        )
+        
+        return _success_response({
+            "followup_drafts_linked": linked_count,
+            "version_drafts_linked": version_linked_count,
+            "total_linked": total_linked,
+            "not_linkable_count": not_linkable_count,
+            "not_linkable_drafts": not_linkable_drafts[:20],  # Limiter à 20
+            "error_count": len(errors),
+            "errors": errors[:10] if errors else None,
+            "message": f"Lié {total_linked} drafts ({linked_count} relances + {version_linked_count} versions), {not_linkable_count} non rapprochables"
+        })
+        
+    except Exception as e:
+        logger.error(
+            f"Erreur lors de la migration des liens: {str(e)}",
+            extra={"extra_fields": {"error": str(e)}}
+        )
+        return _error_response(
+            f"Migration échouée: {str(e)}",
+            500,
+            "migration_error"
+        )
+
+
+@api_bp.route("/shift-followups", methods=["POST"])
+@rate_limit
+def shift_followups() -> Tuple[Dict[str, Any], int]:
+    """
+    Décaler des relances planifiées d'un certain nombre de jours ouvrés (business days).
+    
+    Saute automatiquement les weekends et jours fériés français.
+    
+    Request body:
+        followup_ids (list): Liste des IDs de followups à décaler
+        days_shift (int): Nombre de jours ouvrés à ajouter (positif) ou retirer (négatif)
+    
+    Returns:
+        Résultats du décalage avec détails.
+    """
+    try:
+        from google.cloud import firestore
+        from auto_followup.core.business_days import add_business_days
+        
+        data = request.get_json() or {}
+        followup_ids = data.get("followup_ids", [])
+        days_shift = data.get("days_shift", 0)
+        
+        if not followup_ids:
+            return _error_response(
+                "followup_ids requis",
+                400,
+                "validation_error"
+            )
+        
+        if not isinstance(days_shift, int) or days_shift == 0:
+            return _error_response(
+                "days_shift doit être un entier non nul",
+                400,
+                "validation_error"
+            )
+        
+        db = firestore.Client()
+        followups_ref = db.collection("email_followups")
+        
+        shifted_count = 0
+        skipped_count = 0
+        errors = []
+        results = []
+        
+        for followup_id in followup_ids:
+            try:
+                doc = followups_ref.document(followup_id).get()
+                
+                if not doc.exists:
+                    skipped_count += 1
+                    errors.append(f"Followup {followup_id} non trouvé")
+                    continue
+                
+                data = doc.to_dict()
+                status = data.get("status")
+                
+                # Ne décaler que les relances planifiées
+                if status != "scheduled":
+                    skipped_count += 1
+                    results.append({
+                        "followup_id": followup_id,
+                        "status": "skipped",
+                        "reason": f"status={status} (seules les 'scheduled' peuvent être décalées)"
+                    })
+                    continue
+                
+                scheduled_for = data.get("scheduled_for")
+                if not scheduled_for:
+                    skipped_count += 1
+                    errors.append(f"Followup {followup_id} sans scheduled_for")
+                    continue
+                
+                # Convertir Firestore DatetimeWithNanoseconds en datetime Python standard
+                from datetime import datetime
+                if hasattr(scheduled_for, 'timestamp'):
+                    scheduled_for_dt = datetime.fromtimestamp(scheduled_for.timestamp(), tz=scheduled_for.tzinfo)
+                else:
+                    scheduled_for_dt = scheduled_for
+                
+                # Calculer la nouvelle date en jours ouvrés (gère positif et négatif)
+                new_scheduled_for = add_business_days(scheduled_for_dt, days_shift)
+                
+                # Mettre à jour
+                doc.reference.update({"scheduled_for": new_scheduled_for})
+                shifted_count += 1
+                
+                results.append({
+                    "followup_id": followup_id,
+                    "status": "shifted",
+                    "old_date": scheduled_for.isoformat() if hasattr(scheduled_for, 'isoformat') else str(scheduled_for),
+                    "new_date": new_scheduled_for.isoformat(),
+                    "days_shift": days_shift
+                })
+                
+                logger.info(
+                    f"Followup {followup_id} décalé de {days_shift} jours",
+                    extra={"extra_fields": {
+                        "followup_id": followup_id,
+                        "old_date": scheduled_for.isoformat() if hasattr(scheduled_for, 'isoformat') else str(scheduled_for),
+                        "new_date": new_scheduled_for.isoformat()
+                    }}
+                )
+                
+            except Exception as e:
+                error_msg = f"Erreur pour {followup_id}: {str(e)}"
+                errors.append(error_msg)
+                logger.error(error_msg)
+        
+        return _success_response({
+            "shifted_count": shifted_count,
+            "skipped_count": skipped_count,
+            "total_processed": len(followup_ids),
+            "days_shift": days_shift,
+            "results": results,
+            "errors": errors if errors else None,
+            "message": f"Décalé {shifted_count} relances de {days_shift} jours ouvrés, {skipped_count} ignorées"
+        })
+        
+    except Exception as e:
+        logger.error(
+            f"Erreur lors du décalage: {str(e)}",
+            extra={"extra_fields": {"error": str(e)}}
+        )
+        return _error_response(
+            f"Décalage échoué: {str(e)}",
+            500,
+            "shift_error"
+        )
+
+
+@api_bp.route("/shift-draft-followups/<draft_id>", methods=["POST"])
+@rate_limit
+def shift_draft_followups(draft_id: str) -> Tuple[Dict[str, Any], int]:
+    """
+    Décaler toutes les relances planifiées d'un draft d'un certain nombre de jours ouvrés (business days).
+    
+    Saute automatiquement les weekends et jours fériés français.
+    
+    Path parameter:
+        draft_id: ID du draft initial
+    
+    Request body:
+        days_shift (int): Nombre de jours ouvrés à ajouter (positif) ou retirer (négatif)
+    
+    Returns:
+        Résultats du décalage.
+    """
+    try:
+        from google.cloud import firestore
+        from auto_followup.core.business_days import add_business_days
+        
+        data = request.get_json() or {}
+        days_shift = data.get("days_shift", 0)
+        
+        if not isinstance(days_shift, int) or days_shift == 0:
+            return _error_response(
+                "days_shift doit être un entier non nul",
+                400,
+                "validation_error"
+            )
+        
+        db = firestore.Client()
+        followups_ref = db.collection("email_followups")
+        
+        # Récupérer toutes les relances planifiées de ce draft
+        query = followups_ref.where("draft_id", "==", draft_id).where("status", "==", "scheduled")
+        followups = list(query.stream())
+        
+        if not followups:
+            return _success_response({
+                "shifted_count": 0,
+                "message": "Aucune relance planifiée à décaler pour ce draft"
+            })
+        
+        shifted_count = 0
+        results = []
+        
+        for doc in followups:
+            try:
+                data = doc.to_dict()
+                scheduled_for = data.get("scheduled_for")
+                
+                if not scheduled_for:
+                    continue
+                
+                # Convertir Firestore DatetimeWithNanoseconds en datetime Python standard
+                from datetime import datetime
+                if hasattr(scheduled_for, 'timestamp'):
+                    scheduled_for_dt = datetime.fromtimestamp(scheduled_for.timestamp(), tz=scheduled_for.tzinfo)
+                else:
+                    scheduled_for_dt = scheduled_for
+                
+                # Calculer la nouvelle date en jours ouvrés
+                new_scheduled_for = add_business_days(scheduled_for_dt, days_shift)
+                doc.reference.update({"scheduled_for": new_scheduled_for})
+                shifted_count += 1
+                
+                results.append({
+                    "followup_id": doc.id,
+                    "business_days_after": data.get("business_days_after"),
+                    "old_date": scheduled_for.isoformat() if hasattr(scheduled_for, 'isoformat') else str(scheduled_for),
+                    "new_date": new_scheduled_for.isoformat()
+                })
+                
+            except Exception as e:
+                logger.error(f"Erreur pour followup {doc.id}: {str(e)}")
+        
+        return _success_response({
+            "shifted_count": shifted_count,
+            "days_shift": days_shift,
+            "results": results,
+            "message": f"Décalé {shifted_count} relances de {days_shift} jours ouvrés"
+        })
+        
+    except Exception as e:
+        logger.error(
+            f"Erreur lors du décalage: {str(e)}",
+            extra={"extra_fields": {"error": str(e)}}
+        )
+        return _error_response(
+            f"Décalage échoué: {str(e)}",
+            500,
+            "shift_error"
+        )
+
+
+
