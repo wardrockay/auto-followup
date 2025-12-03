@@ -133,14 +133,14 @@ def add_business_days(start_date: datetime, business_days: int) -> datetime:
     """
     Add a number of business days to a date.
     
-    The resulting date is guaranteed to be a business day.
+    The resulting date is guaranteed to be a business day and set to 1:00 AM UTC.
     
     Args:
         start_date: The starting datetime.
         business_days: Number of business days to add.
         
     Returns:
-        The resulting datetime after adding business days.
+        The resulting datetime after adding business days, set to 1:00 AM UTC.
     """
     current = start_date
     days_added = 0
@@ -150,4 +150,5 @@ def add_business_days(start_date: datetime, business_days: int) -> datetime:
         if is_business_day(current):
             days_added += 1
     
-    return current
+    # Set time to 1:00 AM UTC
+    return current.replace(hour=1, minute=0, second=0, microsecond=0)

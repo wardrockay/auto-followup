@@ -925,3 +925,91 @@ def debug_email_history(x_external_id: str) -> Tuple[Dict[str, Any], int]:
             "history_retrieval_error"
         )
 
+
+@api_bp.route("/fix-followup-times", methods=["POST"])
+@rate_limit
+def fix_followup_times() -> Tuple[Dict[str, Any], int]:
+    """
+    Fix all scheduled followups to have their time set to 1:00 AM UTC.
+    Only modifies the time component, keeps the same date.
+    
+    Returns:
+        Count of followups updated.
+    """
+    try:
+        from google.cloud import firestore
+        from datetime import datetime, timezone
+        
+        db = firestore.Client()
+        followups_ref = db.collection("email_followups")
+        
+        # Get all scheduled followups
+        query = followups_ref.where("status", "==", "scheduled")
+        followups = list(query.stream())
+        
+        updated_count = 0
+        errors = []
+        
+        for doc in followups:
+            try:
+                data = doc.to_dict()
+                scheduled_for = data.get("scheduled_for")
+                
+                if not scheduled_for:
+                    continue
+                
+                # Convert Firestore timestamp to datetime if needed
+                if hasattr(scheduled_for, 'year'):
+                    # It's already a datetime-like object
+                    current_time = scheduled_for
+                    
+                    # Check if time is already 1:00 AM
+                    if current_time.hour == 1 and current_time.minute == 0 and current_time.second == 0:
+                        continue
+                    
+                    # Create new datetime with same date but 1:00 AM
+                    new_time = datetime(
+                        year=current_time.year,
+                        month=current_time.month,
+                        day=current_time.day,
+                        hour=1,
+                        minute=0,
+                        second=0,
+                        microsecond=0,
+                        tzinfo=timezone.utc
+                    )
+                    
+                    # Update in Firestore
+                    doc.reference.update({"scheduled_for": new_time})
+                    updated_count += 1
+                    
+                    logger.info(
+                        f"Updated followup {doc.id}: {current_time} -> {new_time.isoformat()}"
+                    )
+                
+            except Exception as e:
+                errors.append({
+                    "followup_id": doc.id,
+                    "error": str(e)
+                })
+                logger.error(f"Error updating followup {doc.id}: {e}")
+        
+        return _success_response({
+            "updated_count": updated_count,
+            "total_checked": len(followups),
+            "errors": errors if errors else None,
+            "message": f"Successfully updated {updated_count} followups to 1:00 AM UTC"
+        })
+        
+    except Exception as e:
+        logger.error(
+            f"Error fixing followup times: {str(e)}",
+            extra={"extra_fields": {"error": str(e)}}
+        )
+        return _error_response(
+            f"Failed to fix followup times: {str(e)}",
+            500,
+            "fix_times_error"
+        )
+
+
