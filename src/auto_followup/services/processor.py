@@ -117,17 +117,17 @@ class ProcessorService:
             )
         
         if not odoo_lead.last_name:
-            raise ExternalServiceError(
+            raise OdooError(
                 f"Missing last_name in Odoo for x_external_id {x_external_id}"
             )
         
         if not odoo_lead.partner_name:
-            raise ExternalServiceError(
+            raise OdooError(
                 f"Missing partner_name in Odoo for x_external_id {x_external_id}"
             )
         
         if not odoo_lead.website:
-            raise ExternalServiceError(
+            raise OdooError(
                 f"Missing website in Odoo for x_external_id {x_external_id}"
             )
         

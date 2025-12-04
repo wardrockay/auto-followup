@@ -1652,3 +1652,113 @@ def shift_draft_followups(draft_id: str) -> Tuple[Dict[str, Any], int]:
 
 
 
+
+@api_bp.route("/mark-followups-done", methods=["POST"])
+@rate_limit
+def mark_followups_done() -> Tuple[Dict[str, Any], int]:
+    """
+    Marquer des followups comme "done" manuellement.
+    
+    Utile pour corriger des followups qui sont restés "scheduled" alors que 
+    les drafts de relance ont déjà été créés (par exemple après une erreur).
+    
+    Request body:
+        followup_ids (list): Liste des IDs de followups à marquer "done"
+        reason (str, optional): Raison du marquage manuel
+    
+    Returns:
+        Résultats du marquage avec détails.
+    """
+    try:
+        from auto_followup.infrastructure.firestore import FollowupRepository, FollowupStatus
+        
+        data = request.get_json() or {}
+        followup_ids = data.get("followup_ids", [])
+        reason = data.get("reason", "Marqué manuellement comme done")
+        
+        if not followup_ids:
+            return _error_response(
+                "followup_ids est requis",
+                400,
+                "validation_error"
+            )
+        
+        if not isinstance(followup_ids, list):
+            return _error_response(
+                "followup_ids doit être une liste",
+                400,
+                "validation_error"
+            )
+        
+        followup_repo = FollowupRepository()
+        
+        updated = []
+        not_found = []
+        errors = []
+        
+        for followup_id in followup_ids:
+            try:
+                # Check if followup exists
+                followup = followup_repo.get_by_id(followup_id)
+                
+                if followup is None:
+                    not_found.append(followup_id)
+                    continue
+                
+                old_status = followup.status
+                
+                # Update status to "done" using repository method
+                followup_repo.update_status(
+                    followup_id=followup_id,
+                    status=FollowupStatus.DONE,
+                    error_message=None  # Clear any previous errors
+                )
+                
+                updated.append({
+                    "followup_id": followup_id,
+                    "draft_id": followup.draft_id,
+                    "followup_number": followup.followup_number,
+                    "old_status": old_status.value if old_status else None,
+                    "new_status": "done",
+                    "reason": reason
+                })
+                
+                logger.info(
+                    f"Followup {followup_id} marqué comme done manuellement",
+                    extra={"extra_fields": {
+                        "followup_id": followup_id,
+                        "old_status": old_status.value if old_status else None,
+                        "reason": reason
+                    }}
+                )
+                
+            except Exception as e:
+                errors.append({
+                    "followup_id": followup_id,
+                    "error": str(e)
+                })
+                logger.error(
+                    f"Erreur lors du marquage de {followup_id}: {str(e)}",
+                    extra={"extra_fields": {"followup_id": followup_id, "error": str(e)}}
+                )
+        
+        return _success_response({
+            "updated_count": len(updated),
+            "not_found_count": len(not_found),
+            "error_count": len(errors),
+            "updated": updated,
+            "not_found": not_found,
+            "errors": errors,
+            "message": f"Marqué {len(updated)} followups comme done, {len(not_found)} non trouvés, {len(errors)} erreurs"
+        })
+        
+    except Exception as e:
+        logger.error(
+            f"Erreur lors du marquage: {str(e)}",
+            extra={"extra_fields": {"error": str(e)}}
+        )
+        return _error_response(
+            f"Marquage échoué: {str(e)}",
+            500,
+            "mark_done_error"
+        )
