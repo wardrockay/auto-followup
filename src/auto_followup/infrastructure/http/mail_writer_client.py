@@ -65,6 +65,7 @@ class FollowupEmailRequest:
             "partner_name": self.partner_name,
             "x_external_id": self.x_external_id,
             "followup_number": self.followup_number,
+            "draft_id": self.draft_id,  # ID du draft initial pour les relances
             "function": self.function,
             "description": self.description,
             "version_group_id": self.version_group_id,
