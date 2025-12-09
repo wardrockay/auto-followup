@@ -10,6 +10,7 @@ from typing import Dict, List, Optional
 from auto_followup.core.exceptions import (
     DraftNotFoundError,
     ExternalServiceError,
+    OdooError,
 )
 from auto_followup.infrastructure.firestore import (
     DraftRepository,
